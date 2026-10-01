@@ -2,6 +2,7 @@ package io.github.pactproject.app;
 
 import io.github.pactproject.api.Backend;
 import io.github.pactproject.api.BackendFactory;
+import io.github.pactproject.api.ManagedStateProvider;
 import io.github.pactproject.api.StateProvider;
 import io.github.pactproject.api.StateProviderFactory;
 import io.github.pactproject.app.config.BackendConfig;
@@ -26,11 +27,9 @@ public final class PactComponentsFactory
     public PactComponents create(PactConfig config)
             throws PactComponentsException
     {
+        StateProvider stateProvider = null;
         try {
-            StateProvider stateProvider =
-                    createStateProvider(
-                            config.stateProvider()
-                    );
+            stateProvider = createStateProvider(config.stateProvider());
 
             List<Backend> backends =
                     createBackends(
@@ -43,16 +42,32 @@ public final class PactComponentsFactory
             );
         }
         catch (PluginNotFoundException e) {
+            closeStateProvider(stateProvider, e);
             throw new PactComponentsException(
                     "Failed to create PACT components",
                     e
             );
         }
         catch (RuntimeException e) {
+            closeStateProvider(stateProvider, e);
             throw new PactComponentsException(
                     "Failed to create PACT components",
                     e
             );
+        }
+    }
+
+    private void closeStateProvider(
+            StateProvider stateProvider,
+            Exception failure)
+    {
+        if (stateProvider instanceof ManagedStateProvider managed) {
+            try {
+                managed.close();
+            }
+            catch (RuntimeException closeException) {
+                failure.addSuppressed(closeException);
+            }
         }
     }
 

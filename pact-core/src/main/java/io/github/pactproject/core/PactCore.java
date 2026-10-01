@@ -2,6 +2,7 @@ package io.github.pactproject.core;
 
 import io.github.pactproject.api.Access;
 import io.github.pactproject.api.Backend;
+import io.github.pactproject.api.BackendTransaction;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.exception.BackendException;
 import io.github.pactproject.core.exception.ApplyException;
@@ -23,6 +24,7 @@ public final class PactCore {
     private final Map<String, Backend> backends;
 
     private PactState appliedState = PactState.empty();
+    private boolean reconciliationStarted;
 
     public PactCore(Collection<? extends Backend> backends) {
         this.backends = backends.stream()
@@ -37,9 +39,10 @@ public final class PactCore {
         );
     }
 
-    public void apply(PactState desiredState)
+    public synchronized void apply(PactState desiredState)
             throws CoreException {
 
+        reconciliationStarted = true;
         log.debug(
                 "Applying desired state with {} accesses",
                 desiredState.accesses().size()
@@ -59,7 +62,8 @@ public final class PactCore {
                 backendIds
         );
 
-        var affectedBackends = new ArrayList<String>();
+        var transactions =
+                new LinkedHashMap<String, BackendTransaction>();
 
         for (var backendId : backendIds) {
             var previousState = previousByBackend
@@ -82,42 +86,45 @@ public final class PactCore {
                 continue;
             }
 
+            try {
+                transactions.put(
+                        backendId,
+                        backend(backendId).prepare(
+                                previousState,
+                                desiredStateForBackend
+                        )
+                );
+            } catch (BackendException e) {
+                rollback(transactions, e);
+                throw new ApplyException("Failed to prepare desired state", e);
+            }
+        }
+
+        for (var entry : transactions.entrySet()) {
+            var backendId = entry.getKey();
             log.info(
                     "Applying state to backend '{}' ({} -> {} accesses)",
                     backendId,
-                    previousState.accesses().size(),
-                    desiredStateForBackend.accesses().size()
+                    previousByBackend
+                            .getOrDefault(backendId, PactState.empty())
+                            .accesses()
+                            .size(),
+                    desiredByBackend
+                            .getOrDefault(backendId, PactState.empty())
+                            .accesses()
+                            .size()
             );
 
             try {
-                affectedBackends.add(backendId);
-
-                backend(backendId).apply(
-                        desiredStateForBackend
-                );
-
-                log.info(
-                        "Successfully applied state to backend '{}'",
-                        backendId
-                );
-
+                entry.getValue().apply();
             } catch (BackendException e) {
                 log.warn(
                         "Failed to apply state to backend '{}', rolling back",
                         backendId,
                         e
                 );
-
-                rollback(
-                        previousByBackend,
-                        affectedBackends,
-                        e
-                );
-
-                throw new ApplyException(
-                        "Failed to apply desired state",
-                        e
-                );
+                rollback(transactions, e);
+                throw new ApplyException("Failed to apply desired state", e);
             }
         }
 
@@ -126,6 +133,18 @@ public final class PactCore {
         log.info(
                 "Successfully applied desired state to all backends"
         );
+    }
+
+    public synchronized void restoreAppliedState(PactState restoredState)
+            throws CoreException {
+        if (reconciliationStarted) {
+            throw new IllegalStateException(
+                    "Applied state can only be restored before reconciliation"
+            );
+        }
+
+        validateBackends(restoredState);
+        appliedState = restoredState;
     }
 
     private void validateBackends(PactState desiredState)
@@ -146,12 +165,11 @@ public final class PactCore {
     }
 
     private void rollback(
-            Map<String, PactState> previousStateByBackend,
-            List<String> affectedBackends,
+            Map<String, BackendTransaction> transactions,
             BackendException applyException
     ) throws RollbackException {
 
-        if (affectedBackends.isEmpty()) {
+        if (transactions.isEmpty()) {
             log.debug(
                     "Nothing to rollback"
             );
@@ -160,28 +178,24 @@ public final class PactCore {
 
         log.info(
                 "Rolling back {} backend(s): {}",
-                affectedBackends.size(),
-                affectedBackends
+                transactions.size(),
+                transactions.keySet()
         );
 
         RollbackException rollbackException = null;
 
-        for (var i = affectedBackends.size() - 1; i >= 0; i--) {
-            var backendId = affectedBackends.get(i);
-
-            var previousState = previousStateByBackend.getOrDefault(
-                    backendId,
-                    PactState.empty()
-            );
+        var entries = new ArrayList<>(transactions.entrySet());
+        for (var i = entries.size() - 1; i >= 0; i--) {
+            var entry = entries.get(i);
+            var backendId = entry.getKey();
 
             log.info(
-                    "Rolling back backend '{}' to {} access(es)",
-                    backendId,
-                    previousState.accesses().size()
+                    "Rolling back backend '{}'",
+                    backendId
             );
 
             try {
-                backend(backendId).apply(previousState);
+                entry.getValue().rollback();
 
                 log.info(
                         "Successfully rolled back backend '{}'",

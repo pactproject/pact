@@ -2,7 +2,9 @@ package io.github.pactproject.core;
 
 import io.github.pactproject.api.Access;
 import io.github.pactproject.api.Backend;
+import io.github.pactproject.api.BackendTransaction;
 import io.github.pactproject.api.PactState;
+import io.github.pactproject.api.exception.BackendException;
 import io.github.pactproject.api.Resource;
 import io.github.pactproject.api.exception.BackendOperationException;
 import io.github.pactproject.core.exception.ApplyException;
@@ -47,6 +49,94 @@ class PactCoreTest {
 
         assertEquals(1, backend.applyCount());
         assertEquals(state, backend.currentState());
+    }
+
+    @Test
+    void restoresAppliedStateWithoutApplyingItAgain() throws Exception {
+        var backend = new TestBackend("test");
+        var core = new PactCore(List.of(backend));
+        var restoredState = state(
+                access("alice", "test", "table", "events")
+        );
+
+        core.restoreAppliedState(restoredState);
+        core.apply(restoredState);
+
+        assertEquals(0, backend.applyCount());
+    }
+
+    @Test
+    void preparesChangedBackendsBeforeApplyingAny() throws Exception {
+        var operations = new ArrayList<String>();
+        var core = new PactCore(
+                List.of(
+                        transactionBackend("first", operations),
+                        transactionBackend("second", operations)
+                )
+        );
+
+        core.apply(state(
+                access("alice", "first", "table", "events"),
+                access("alice", "second", "table", "events")
+        ));
+
+        assertEquals(
+                List.of(
+                        "prepare:first",
+                        "prepare:second",
+                        "apply:first",
+                        "apply:second"
+                ),
+                operations
+        );
+    }
+
+    @Test
+    void rollsBackPreparedTransactionsWhenPreparationFails() {
+        var operations = new ArrayList<String>();
+        Backend prepared = transactionBackend("first", operations);
+        Backend failing = new Backend()
+        {
+            @Override
+            public String id()
+            {
+                return "second";
+            }
+
+            @Override
+            public void apply(PactState state)
+            {
+                throw new AssertionError("apply must not run");
+            }
+
+            @Override
+            public BackendTransaction prepare(
+                    PactState previousState,
+                    PactState desiredState)
+                    throws BackendException
+            {
+                operations.add("prepare:second");
+                throw new BackendOperationException("prepare failed");
+            }
+        };
+        var core = new PactCore(List.of(prepared, failing));
+
+        assertThrows(
+                ApplyException.class,
+                () -> core.apply(state(
+                        access("alice", "first", "table", "events"),
+                        access("alice", "second", "table", "events")
+                ))
+        );
+
+        assertEquals(
+                List.of(
+                        "prepare:first",
+                        "prepare:second",
+                        "rollback:first"
+                ),
+                operations
+        );
     }
 
     @Test
@@ -324,6 +414,50 @@ class PactCoreTest {
                 ),
                 Map.of()
         );
+    }
+
+    private static Backend transactionBackend(
+            String id,
+            List<String> operations)
+    {
+        return new Backend()
+        {
+            @Override
+            public String id()
+            {
+                return id;
+            }
+
+            @Override
+            public void apply(PactState state)
+            {
+                throw new AssertionError(
+                        "Prepared transaction should handle apply"
+                );
+            }
+
+            @Override
+            public BackendTransaction prepare(
+                    PactState previousState,
+                    PactState desiredState)
+            {
+                operations.add("prepare:" + id);
+                return new BackendTransaction()
+                {
+                    @Override
+                    public void apply()
+                    {
+                        operations.add("apply:" + id);
+                    }
+
+                    @Override
+                    public void rollback()
+                    {
+                        operations.add("rollback:" + id);
+                    }
+                };
+            }
+        };
     }
 
     private static PactState initialStateFor(String backendId) {

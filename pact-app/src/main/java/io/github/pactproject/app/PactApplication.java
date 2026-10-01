@@ -1,7 +1,9 @@
 package io.github.pactproject.app;
 
-import io.github.pactproject.api.PactState;
+import io.github.pactproject.api.ManagedStateProvider;
 import io.github.pactproject.api.StateProvider;
+import io.github.pactproject.api.StateReconciler;
+import io.github.pactproject.api.exception.StateReconciliationException;
 import io.github.pactproject.app.config.PactConfig;
 import io.github.pactproject.app.config.PactConfigException;
 import io.github.pactproject.app.config.PactConfigLoader;
@@ -16,6 +18,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 
 public final class PactApplication
         implements AutoCloseable
@@ -23,18 +27,31 @@ public final class PactApplication
     private static final Logger log =
             LoggerFactory.getLogger(PactApplication.class);
 
-    private final PactCore core;
-    private final StateProvider stateProvider;
     private final PluginSet plugins;
+    private final ReconciliationQueue reconciliationQueue;
+    private final ManagedStateProvider managedStateProvider;
+    private final PactCore core;
+    private final CountDownLatch shutdown = new CountDownLatch(1);
+    private boolean closed;
 
     private PactApplication(
             PactCore core,
             StateProvider stateProvider,
             PluginSet plugins)
     {
-        this.core = core;
-        this.stateProvider = stateProvider;
         this.plugins = plugins;
+        this.core = core;
+        if (stateProvider instanceof ManagedStateProvider managed) {
+            this.managedStateProvider = managed;
+            this.reconciliationQueue = null;
+        }
+        else {
+            this.managedStateProvider = null;
+            this.reconciliationQueue = new ReconciliationQueue(
+                    stateProvider,
+                    core
+            );
+        }
     }
 
     public static PactApplication create(
@@ -56,11 +73,12 @@ public final class PactApplication
                             pluginsDirectory
                     );
 
+            PactComponents components = null;
             try {
                 PluginRegistry registry =
                         new PluginRegistry(plugins);
 
-                PactComponents components =
+                components =
                         new PactComponentsFactory(
                                 registry
                         ).create(config);
@@ -77,6 +95,7 @@ public final class PactApplication
                 );
             }
             catch (Exception e) {
+                closeManagedStateProvider(components, e);
                 try {
                     plugins.close();
                 }
@@ -101,44 +120,135 @@ public final class PactApplication
         }
     }
 
+    private static void closeManagedStateProvider(
+            PactComponents components,
+            Exception failure)
+    {
+        if (components != null
+                && components.stateProvider()
+                instanceof ManagedStateProvider managed) {
+            try {
+                managed.close();
+            }
+            catch (RuntimeException closeException) {
+                failure.addSuppressed(closeException);
+            }
+        }
+    }
+
     public void run()
             throws PactApplicationException
     {
-        try {
-            log.info("Loading desired PACT state");
-
-            PactState desiredState =
-                    stateProvider.load();
-
-            log.info(
-                    "Loaded desired state with {} accesses",
-                    desiredState.accesses().size()
-            );
-
-            core.apply(desiredState);
-
-            log.info(
-                    "PACT reconciliation completed successfully"
-            );
+        if (managedStateProvider != null) {
+            runManagedController();
+            return;
         }
-        catch (CoreException e) {
+
+        try {
+            reconciliationQueue
+                    .submit()
+                    .join();
+        }
+        catch (CompletionException e) {
             throw new PactApplicationException(
                     "PACT reconciliation failed",
+                    e.getCause()
+            );
+        }
+    }
+
+    private void runManagedController()
+            throws PactApplicationException
+    {
+        try {
+            managedStateProvider.start(
+                    new StateReconciler() {
+                        @Override
+                        public void restoreAppliedState(
+                                io.github.pactproject.api.PactState state)
+                                throws StateReconciliationException
+                        {
+                            try {
+                                core.restoreAppliedState(state);
+                            }
+                            catch (CoreException e) {
+                                throw new StateReconciliationException(
+                                        "Failed to restore applied state",
+                                        e
+                                );
+                            }
+                        }
+
+                        @Override
+                        public void apply(
+                                io.github.pactproject.api.PactState state)
+                                throws StateReconciliationException
+                        {
+                            try {
+                                core.apply(state);
+                            }
+                            catch (CoreException e) {
+                                throw new StateReconciliationException(
+                                        "Failed to reconcile desired state",
+                                        e
+                                );
+                            }
+                        }
+                    }
+            );
+            shutdown.await();
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new PactApplicationException(
+                    "PACT controller was interrupted",
                     e
             );
         }
         catch (Exception e) {
             throw new PactApplicationException(
-                    "Failed to load desired PACT state",
+                    "PACT Kubernetes controller failed to start",
                     e
             );
         }
     }
 
     @Override
-    public void close()
+    public synchronized void close()
             throws IOException
     {
-        plugins.close();
+        if (closed) {
+            return;
+        }
+        closed = true;
+        RuntimeException closeFailure = null;
+        try {
+            if (managedStateProvider != null) {
+                managedStateProvider.close();
+            }
+            else {
+                reconciliationQueue.close();
+            }
+        }
+        catch (RuntimeException e) {
+            closeFailure = e;
+        }
+        finally {
+            shutdown.countDown();
+        }
+        try {
+            plugins.close();
+        }
+        catch (IOException e) {
+            if (closeFailure != null) {
+                closeFailure.addSuppressed(e);
+            }
+            else {
+                throw e;
+            }
+        }
+        if (closeFailure != null) {
+            throw closeFailure;
+        }
     }
 }

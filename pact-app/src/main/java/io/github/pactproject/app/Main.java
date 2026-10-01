@@ -20,12 +20,29 @@ public final class Main
         Path configPath = Path.of(args[0]);
         Path pluginsDirectory = Path.of(args[1]);
 
-        try (PactApplication application =
-                     PactApplication.create(
-                             configPath,
-                             pluginsDirectory
-                     )) {
+        PactApplication application;
+        try {
+            application = PactApplication.create(
+                    configPath,
+                    pluginsDirectory
+            );
+        }
+        catch (Exception e) {
+            System.err.println(
+                    "PACT failed: " + e.getMessage()
+            );
+            e.printStackTrace(System.err);
+            System.exit(1);
+            return;
+        }
 
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(
+                        () -> closeApplication(application),
+                        "pact-shutdown"
+                )
+        );
+        try (application) {
             application.run();
         }
         catch (Exception e) {
@@ -36,6 +53,18 @@ public final class Main
             e.printStackTrace(System.err);
 
             System.exit(1);
+        }
+    }
+
+    private static void closeApplication(PactApplication application)
+    {
+        try {
+            application.close();
+        }
+        catch (Exception e) {
+            System.err.println(
+                    "Failed to close PACT cleanly: " + e.getMessage()
+            );
         }
     }
 }

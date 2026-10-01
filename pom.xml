@@ -14,6 +14,7 @@
         <maven.surefire.plugin.version>3.2.5</maven.surefire.plugin.version>
 
         <jackson.version>2.20.0</jackson.version>
+        <postgresql.jdbc.version>42.7.13</postgresql.jdbc.version>
         <slf4j.version>2.0.17</slf4j.version>
         <junit.version>5.13.4</junit.version>
         <logback.version>1.5.18</logback.version>
@@ -27,6 +28,9 @@
         <module>pact-artifactkeeper</module>
         <module>pact-filesystem</module>
         <module>pact-app</module>
+        <module>pact-kubernetes</module>
+        <module>pact-ranger</module>
+        <module>pact-postgresql</module>
     </modules>
 
     <dependencyManagement>
