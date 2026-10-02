@@ -141,6 +141,21 @@ Run the application with the config path and plugins directory:
 pact-app <config> <plugins-directory>
 ```
 
+## Docker image
+
+Build the image from the repository root so the Docker build can access the
+multi-module Maven project:
+
+```shell
+docker build -t pact:local .
+```
+
+The image includes the application and the currently implemented state
+providers and backends as plugins. Mount a PACT YAML configuration file at
+`/etc/pact/config.yaml`; the default command uses that file and
+`/opt/pact/plugins`. Supply backend credentials through the deployment's
+secret mechanism rather than baking them into the image.
+
 The Kubernetes state provider runs as a controller and watches `DataAccess`
 resources cluster-wide. It requires the corresponding CRD, status subresource,
 and RBAC; see [`pact-kubernetes/README.md`](pact-kubernetes/README.md).
