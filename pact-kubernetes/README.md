@@ -15,6 +15,13 @@ configuration keys are `group`, `version`, and `plural`; their defaults are
 environment variables. Explicit provider configuration takes precedence over
 the environment.
 
+Controller timing can be tuned with `informer-resync-millis` (default 5000),
+`informer-start-timeout-seconds` (default 30), and
+`status-retry-delays-millis` (default `100,200,400`). The retry setting is a
+comma-separated sequence of positive millisecond delays; it controls retries
+after the initial status patch attempt. These settings are configured in the
+state provider's `config` map.
+
 `KubernetesConfig` owns resource coordinate parsing and defaults. The
 `controller` package contains informer, queue, status, and finalizer behavior;
 the `compile` package translates DataAccess specs into PACT state.
