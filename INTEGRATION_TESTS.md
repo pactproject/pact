@@ -13,12 +13,16 @@ resources:
   creates or reuses the configured test user; that Ranger user is retained
   after the test.
 - A dedicated Artifact Keeper instance with no existing permissions, plus a
-  pre-created test user and repository. Artifact Keeper reconciliation lists
-  and synchronizes permissions for the whole instance.
+  pre-created test user and at least two repositories. Artifact Keeper
+  reconciliation lists and synchronizes permissions for the whole instance.
+  The service-account test leaves its uniquely named service account in place;
+  the test removes only the permission it created.
 
 The Ranger test restores its initial managed-policy snapshot; the
 Artifact Keeper test returns its dedicated instance to the initially empty
-permission state. The Kubernetes test deletes its temporary custom resource.
+permission state. Its service-account integration test retains the generated
+account because Artifact Keeper does not expose user deletion through this
+backend. The Kubernetes test deletes its temporary custom resource.
 Do not point these tests at production or shared instances. Credentials are
 read from environment variables and are not written to the repository.
 

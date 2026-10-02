@@ -37,11 +37,6 @@ public final class DataAccessController
             LoggerFactory.getLogger(DataAccessController.class);
 
     private static final String FINALIZER_NAME = "data-access";
-    private static final long INFORMER_RESYNC_MILLIS = 30_000L;
-    private static final long INFORMER_START_TIMEOUT_SECONDS = 30L;
-    private static final long[] STATUS_RETRY_DELAYS_MILLIS =
-            {100L, 200L, 400L};
-
     private final KubernetesClient client;
     private final KubernetesConfig config;
     private final ResourceDefinitionContext resourceContext;
@@ -129,7 +124,10 @@ public final class DataAccessController
 
             informer = client.genericKubernetesResources(resourceContext)
                     .inAnyNamespace()
-                    .inform(new DataAccessEventHandler(), INFORMER_RESYNC_MILLIS);
+                    .inform(
+                            new DataAccessEventHandler(),
+                            config.informerResyncMillis()
+                    );
             awaitInformerSync();
             started = true;
             log.info(
@@ -202,7 +200,9 @@ public final class DataAccessController
             throws InterruptedException
     {
         long deadline = System.nanoTime()
-                + TimeUnit.SECONDS.toNanos(INFORMER_START_TIMEOUT_SECONDS);
+                + TimeUnit.SECONDS.toNanos(
+                        config.informerStartTimeoutSeconds()
+                );
         while (!informer.hasSynced()) {
             if (System.nanoTime() >= deadline) {
                 throw new IllegalStateException(
@@ -500,7 +500,8 @@ public final class DataAccessController
             ResourceKey key,
             Map<String, Object> desiredStatus)
     {
-        for (int attempt = 0; attempt <= STATUS_RETRY_DELAYS_MILLIS.length; attempt++) {
+        List<Long> retryDelays = config.statusRetryDelaysMillis();
+        for (int attempt = 0; attempt <= retryDelays.size(); attempt++) {
             try {
                 GenericKubernetesResource current = resource(key).get();
                 if (current == null) {
@@ -531,7 +532,7 @@ public final class DataAccessController
                 return;
             }
             catch (RuntimeException e) {
-                if (attempt == STATUS_RETRY_DELAYS_MILLIS.length) {
+                if (attempt == retryDelays.size()) {
                     log.error(
                             "Failed to patch DataAccess status for {}/{} after retries",
                             key.namespace(),
@@ -541,7 +542,7 @@ public final class DataAccessController
                     return;
                 }
                 try {
-                    Thread.sleep(STATUS_RETRY_DELAYS_MILLIS[attempt]);
+                    Thread.sleep(retryDelays.get(attempt));
                 }
                 catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
@@ -592,16 +593,11 @@ public final class DataAccessController
         if (!finalizers.remove(finalizer)) {
             return;
         }
-        GenericKubernetesResource patch =
-                patchResource(key, current.getMetadata().getResourceVersion());
-        patch.getMetadata().setFinalizers(finalizers);
+        current.getMetadata().setFinalizers(finalizers);
         client.genericKubernetesResources(resourceContext)
                 .inNamespace(key.namespace())
                 .withName(key.name())
-                .patch(
-                        PatchContext.of(PatchType.JSON_MERGE),
-                        patch
-                );
+                .patch(current);
     }
 
     private io.fabric8.kubernetes.client.dsl.Resource<GenericKubernetesResource> resource(

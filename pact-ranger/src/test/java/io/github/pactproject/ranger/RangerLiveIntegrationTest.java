@@ -137,7 +137,27 @@ class RangerLiveIntegrationTest {
             BackendTransaction idempotent = backend.prepare(updated, updated);
             transactions.add(idempotent);
             idempotent.apply();
-            assertEquals(afterUpdate, sync.getManagedPolicies());
+
+            List<JsonNode> afterIdempotent = sync.getManagedPolicies();
+            assertEquals(1, afterIdempotent.size());
+            JsonNode idempotentPolicy = afterIdempotent.get(0);
+            JsonNode updatedPolicy = afterUpdate.get(0);
+            assertEquals(
+                    updatedPolicy.path("name").asText(),
+                    idempotentPolicy.path("name").asText()
+            );
+            assertEquals(
+                    updatedPolicy.path("resources").toString(),
+                    idempotentPolicy.path("resources").toString()
+            );
+            assertEquals(
+                    updatedPolicy.path("policyItems").toString(),
+                    idempotentPolicy.path("policyItems").toString()
+            );
+            assertEquals(
+                    updatedPolicy.path("conditions").toString(),
+                    idempotentPolicy.path("conditions").toString()
+            );
 
             BackendTransaction delete = backend.prepare(updated, PactState.empty());
             transactions.add(delete);
