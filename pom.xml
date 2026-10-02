@@ -31,6 +31,7 @@
         <module>pact-kubernetes</module>
         <module>pact-ranger</module>
         <module>pact-postgresql</module>
+        <module>pact-elasticsearch</module>
     </modules>
 
     <dependencyManagement>

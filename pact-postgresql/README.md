@@ -1,8 +1,8 @@
 # PACT PostgreSQL backend
 
-This module is the starting point for a PostgreSQL backend. The Maven module
-and pgJDBC runtime dependency are registered in the reactor; backend
-implementation and plugin registration are not implemented yet.
+`pact-postgresql` provides a plugin backend for PostgreSQL database-level
+privileges over JDBC. Row-level security and identity/password provisioning
+remain out of scope.
 
 The first authorization scope is deliberately limited to database-level
 privileges granted through JDBC. Role/identity provisioning is a separate
@@ -40,10 +40,13 @@ resources:
             - TEMPORARY
 ```
 
-The YAML fragment is illustrative: this module currently provides no
-`postgresql` backend factory, so PACT cannot yet load it as a plugin. Inject
-credentials using the deployment's secret mechanism; do not commit real
-passwords to configuration.
+The PostgreSQL backend factory is registered with Java `ServiceLoader`.
+Settings `jdbc-url`, `username`, and `password` are required. The JDBC URL
+should connect to a maintenance database on the target cluster; database
+names being managed are passed to `GRANT`/`REVOKE` as SQL identifiers.
+Inject credentials using the deployment's secret mechanism; do not commit
+real passwords to configuration. The plugin runtime needs pgJDBC
+(`org.postgresql:postgresql`) visible in the plugin class loader.
 
 For the initial version:
 
@@ -51,12 +54,45 @@ For the initial version:
 - `Resource.backendId` selects the configured PostgreSQL connection.
 - `Resource.target.database` selects the database.
 - `Access.attributes.permissions.database` is a set of database privileges.
-- The initial allow-list is `CONNECT`, `CREATE`, and `TEMPORARY` (`TEMP` may be
-  accepted as an alias if the implementation chooses to normalize it).
+- The allow-list is `CONNECT`, `CREATE`, and `TEMPORARY`; `TEMP` is accepted as
+  a case-insensitive alias for `TEMPORARY`.
 - `WITH GRANT OPTION`, `PUBLIC`, role membership, object ownership and
   schema/table/sequence/function privileges are out of scope.
 - Unknown privilege names and malformed targets must fail validation rather
   than be interpolated into SQL.
+- An access with an empty or absent `permissions.database` set expresses no
+  grants for that role/database; previously PACT-managed grants in scope are
+  revoked.
+
+## Grant ownership contract
+
+The PostgreSQL login configured for this backend is the PACT grantor. Its
+database ACL entries (the PostgreSQL ACL `grantor`) are the ownership boundary:
+the backend reads only grants issued by `current_user`, never manages `PUBLIC`
+or grants issued by another role, and reconciles PACT's direct database grants
+to the desired set. The grantor identity should be dedicated to PACT and must
+not be used for manual grants or shared with another independently
+reconciling PACT backend for overlapping databases. Otherwise those grants
+cannot be distinguished from PACT-owned state.
+
+The grantor must already have sufficient authority to grant/revoke the
+configured database privileges and connect to the maintenance database. The
+backend does not create roles, databases, or grant options. If it encounters a
+grant-option ACL entry from its own grantor, reconciliation fails closed
+rather than taking ownership of a capability outside the contract. A revoke
+that would invalidate dependent delegated grants can fail under PostgreSQL's
+default `RESTRICT`; PACT does not use `CASCADE`.
+
+Only databases named by the previous or desired PACT state are in a
+reconciliation's scope. This allows deletion of the final access for a
+database to clean its PACT grants without touching unrelated databases. It
+also means grants manually created by the dedicated grantor in an in-scope
+database are considered managed and may be revoked when absent from desired
+state.
+
+The backend does not promise exact effective privileges: ownership,
+`PUBLIC`, role memberships, defaults, and grants from other grantors can still
+confer access. No role provisioning or password change is performed.
 
 Database privileges do not imply data access by themselves. For example,
 `CONNECT` permits connecting to the database; schema `USAGE` and object-level
@@ -216,13 +252,13 @@ grants, RLS, or a PostgreSQL backend plugin.
 
 ## Reconciliation and ownership boundary
 
-The backend should compile `PactState` into desired direct grants, read actual
-grants, calculate a normalized diff, and apply `GRANT`/`REVOKE` statements in a
-JDBC transaction. A prepared `BackendTransaction` should retain enough prior
-state to compensate if another backend fails during a PACT reconciliation.
-Database identifiers must be quoted as SQL identifiers with correct escaping;
-they cannot be safely substituted as ordinary query parameters. Passwords and
-credential-bearing JDBC URLs must not be logged.
+The backend compiles `PactState` into desired direct grants, reads actual
+grants, calculates a normalized diff, and applies `GRANT`/`REVOKE` statements
+in a JDBC transaction. A prepared `BackendTransaction` snapshots the actual
+PACT-owned grants in scope to compensate if another backend fails during a
+PACT reconciliation. Database and role identifiers are quoted as SQL
+identifiers with embedded quotes escaped; they are not interpolated as
+unquoted SQL. Passwords and credential-bearing JDBC URLs are not logged.
 
 PostgreSQL effective privileges can come from direct grants, grants to
 `PUBLIC`, inherited role memberships, or object ownership. PACT should manage
@@ -233,12 +269,11 @@ an explicit strategy for identifying PACT-owned grants and must document the
 grant-manager role's required permissions. Exact effective-access enforcement
 is not promised by this narrow contract.
 
-The first connection is expected to be to a maintenance database in the
-configured PostgreSQL cluster. PostgreSQL roles are cluster-wide, while
-database privileges name a database in that cluster. Deployment-specific
-constraints (for example, managed PostgreSQL products that restrict role
-administration) will need integration coverage before being claimed as
-supported.
+The first connection is to a maintenance database in the configured
+PostgreSQL cluster. PostgreSQL roles are cluster-wide, while database
+privileges name a database in that cluster. Deployment-specific constraints
+(for example, managed PostgreSQL products that restrict grant authority) need
+integration coverage before being claimed as supported.
 
 ## Identity provisioning: proposed separate domain
 

@@ -1,0 +1,148 @@
+package io.github.pactproject.postgresql;
+
+import io.github.pactproject.api.Access;
+import io.github.pactproject.api.BackendTransaction;
+import io.github.pactproject.api.PactState;
+import io.github.pactproject.api.Resource;
+import io.github.pactproject.api.exception.BackendOperationException;
+import io.github.pactproject.api.exception.ValidationException;
+import io.github.pactproject.api.value.Value;
+import io.github.pactproject.postgresql.api.PostgreSqlClient;
+import io.github.pactproject.postgresql.api.PostgreSqlClientException;
+import io.github.pactproject.postgresql.model.DatabaseGrant;
+import io.github.pactproject.postgresql.model.DatabasePrivilege;
+import org.junit.jupiter.api.Test;
+
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+class PostgreSqlBackendTest {
+    @Test
+    void appliesDesiredStateAndCompensatesToSnapshot() throws Exception {
+        FakeClient client = new FakeClient();
+        DatabaseGrant existing = grant("analytics", "alice", DatabasePrivilege.CONNECT);
+        client.actual.add(existing);
+        DatabaseGrant unrelated = grant("unmanaged", "bob", DatabasePrivilege.CREATE);
+        client.actual.add(unrelated);
+        PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
+
+        PactState previous = state("alice", "analytics", "CONNECT");
+        PactState desired = state("alice", "analytics", "CREATE");
+        BackendTransaction transaction = backend.prepare(previous, desired);
+
+        transaction.apply();
+        assertEquals(
+                Set.of(
+                        grant("analytics", "alice", DatabasePrivilege.CREATE),
+                        unrelated
+                ),
+                client.actual
+        );
+
+        transaction.rollback();
+        assertEquals(Set.of(existing, unrelated), client.actual);
+    }
+
+    @Test
+    void removesStaleGrantsWhenDesiredDatabaseHasNoPermissions() throws Exception {
+        FakeClient client = new FakeClient();
+        client.actual.add(grant("analytics", "alice", DatabasePrivilege.CONNECT));
+        PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
+
+        PactState previous = state("alice", "analytics", "CONNECT");
+        PactState desired = new PactState(Set.of(new Access(
+                "alice",
+                new Resource("postgres", Map.of("database", "analytics")),
+                Map.of()
+        )));
+
+        backend.prepare(previous, desired).apply();
+        assertEquals(Set.of(), client.actual);
+    }
+
+    @Test
+    void rejectsInvalidDesiredStateBeforeChangingDatabase() {
+        FakeClient client = new FakeClient();
+        PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
+        PactState invalid = state("alice", "analytics", "SELECT");
+
+        assertThrows(
+                ValidationException.class,
+                () -> backend.prepare(PactState.empty(), invalid)
+        );
+        assertEquals(Set.of(), client.actual);
+    }
+
+    @Test
+    void wrapsClientFailuresDuringPrepare() {
+        FakeClient client = new FakeClient();
+        client.failOnRead = true;
+        PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
+
+        assertThrows(
+                BackendOperationException.class,
+                () -> backend.prepare(
+                        PactState.empty(),
+                        state("alice", "analytics", "CONNECT")
+                )
+        );
+    }
+
+    private static PactState state(
+            String role,
+            String database,
+            String... permissions
+    ) {
+        return new PactState(Set.of(new Access(
+                role,
+                new Resource("postgres", Map.of("database", database)),
+                Map.of(
+                        "permissions",
+                        Value.object(Map.of(
+                                "database",
+                                Value.set(java.util.Arrays.stream(permissions)
+                                        .map(Value::string)
+                                        .collect(Collectors.toSet()))
+                        ))
+                )
+        )));
+    }
+
+    private static DatabaseGrant grant(
+            String database,
+            String role,
+            DatabasePrivilege privilege
+    ) {
+        return new DatabaseGrant(database, role, privilege);
+    }
+
+    private static final class FakeClient implements PostgreSqlClient {
+        private final Set<DatabaseGrant> actual = new HashSet<>();
+        private boolean failOnRead;
+
+        @Override
+        public Set<DatabaseGrant> getManagedGrants(Set<String> databases)
+                throws PostgreSqlClientException {
+            if (failOnRead) {
+                throw new PostgreSqlClientException("test read failure");
+            }
+            return actual.stream()
+                    .filter(grant -> databases.contains(grant.database()))
+                    .collect(Collectors.toUnmodifiableSet());
+        }
+
+        @Override
+        public void synchronize(
+                Set<String> databases,
+                Set<DatabaseGrant> desired
+        ) {
+            actual.removeIf(grant -> databases.contains(grant.database()));
+            actual.addAll(desired);
+        }
+    }
+}
