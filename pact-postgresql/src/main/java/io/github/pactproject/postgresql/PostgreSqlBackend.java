@@ -8,8 +8,8 @@ import io.github.pactproject.api.exception.BackendOperationException;
 import io.github.pactproject.api.exception.ValidationException;
 import io.github.pactproject.postgresql.api.PostgreSqlClient;
 import io.github.pactproject.postgresql.api.PostgreSqlClientException;
-import io.github.pactproject.postgresql.compile.DatabaseGrantCompiler;
-import io.github.pactproject.postgresql.model.DatabaseGrant;
+import io.github.pactproject.postgresql.compile.GrantCompiler;
+import io.github.pactproject.postgresql.model.Grant;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -44,19 +44,19 @@ public final class PostgreSqlBackend implements Backend {
             PactState desiredState
     ) throws BackendException {
         compile(previousState);
-        Set<DatabaseGrant> desiredGrants = compile(desiredState);
+        Set<Grant> desiredGrants = compile(desiredState);
         Set<String> databases = new HashSet<>(
-                DatabaseGrantCompiler.databases(previousState, id)
+                GrantCompiler.databases(previousState, id)
         );
-        databases.addAll(DatabaseGrantCompiler.databases(desiredState, id));
+        databases.addAll(GrantCompiler.databases(desiredState, id));
         Set<String> scope = Set.copyOf(databases);
-        Set<DatabaseGrant> snapshot;
+        Set<Grant> snapshot;
         try {
             snapshot = client.getManagedGrants(scope);
         }
         catch (PostgreSqlClientException e) {
             throw new BackendOperationException(
-                    "Failed to prepare PostgreSQL database grants for backend '"
+                    "Failed to prepare PostgreSQL grants for backend '"
                             + id + "'",
                     e
             );
@@ -74,10 +74,10 @@ public final class PostgreSqlBackend implements Backend {
         };
     }
 
-    private Set<DatabaseGrant> compile(PactState state)
+    private Set<Grant> compile(PactState state)
             throws ValidationException {
         try {
-            return DatabaseGrantCompiler.compile(state, id);
+            return GrantCompiler.compile(state, id);
         }
         catch (IllegalArgumentException e) {
             throw new ValidationException(
@@ -90,7 +90,7 @@ public final class PostgreSqlBackend implements Backend {
 
     private void synchronize(
             Set<String> databases,
-            Set<DatabaseGrant> desired,
+            Set<Grant> desired,
             String operation
     ) throws BackendException {
         try {
@@ -99,7 +99,7 @@ public final class PostgreSqlBackend implements Backend {
         catch (PostgreSqlClientException e) {
             throw new BackendOperationException(
                     "Failed to " + operation
-                            + " PostgreSQL database grants for backend '"
+                            + " PostgreSQL grants for backend '"
                             + id + "'",
                     e
             );

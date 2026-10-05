@@ -35,6 +35,28 @@ is the service name used by `DataAccess.spec.resources`. Registry locations
 with `name` are translated to Artifact Keeper repository targets, and
 `permissions` are translated to backend `actions`.
 
+### Target lists
+
+A target field can be a scalar or a non-empty list of scalar values. When
+multiple fields are lists, the compiler expands them into the Cartesian
+product of concrete targets before creating PACT resources. For example,
+two schemas and three columns produce six target combinations for each user.
+The same behavior applies to the Registry `name` field. Empty lists and
+nested/non-scalar list items are rejected.
+
+```yaml
+resources:
+  - postgresql:
+      database: analytics
+      schema: [sales, audit]
+      table: orders
+      column: [id, email]
+    access:
+      - users: [app]
+        permissions:
+          column: [SELECT]
+```
+
 ## Controller behavior
 
 - Startup lists all `DataAccess` resources and rebuilds applied state only from

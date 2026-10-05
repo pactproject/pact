@@ -1,14 +1,139 @@
 # PACT PostgreSQL backend
 
-`pact-postgresql` provides a plugin backend for PostgreSQL database-level
-privileges over JDBC. Row-level security and identity/password provisioning
-remain out of scope.
+`pact-postgresql` provides a plugin backend for PostgreSQL privileges over
+JDBC at database, schema, table, column, sequence, function and procedure
+levels.
+Row-level security and identity/password provisioning remain out of scope.
 
-The first authorization scope is deliberately limited to database-level
-privileges granted through JDBC. Role/identity provisioning is a separate
-design concern described below; it is not part of the grant compiler.
+Role/identity provisioning is a separate design concern described below; it is
+not part of the grant compiler.
 
-## Initial access contract
+## Access contract
+
+Like Trino and Ozone, the resource `target` is a path through the object
+hierarchy and the keys of `permissions` are levels of that path:
+
+| Level | Target field | Privileges |
+| --- | --- | --- |
+| `database` | `database` | `CONNECT`, `CREATE`, `TEMPORARY` (`TEMP`) |
+| `schema` | `schema` | `USAGE`, `CREATE` |
+| `table` | `table` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` |
+| `column` | `column` | `SELECT`, `INSERT`, `UPDATE`, `REFERENCES` |
+| `sequence` | `sequence` | `USAGE`, `SELECT`, `UPDATE` |
+| `function` | `function` | `EXECUTE` |
+| `procedure` | `procedure` | `EXECUTE` |
+
+- `database` is required; each deeper field requires its parent
+  (`table`, `sequence`, `function` and `procedure` need `schema`;
+  `column` needs `table`).
+- `sequence` is a sibling branch of `table` under `schema`. A resource can
+  name both branches, for example a table and its associated sequence; the
+  sequence is identified by its schema and sequence name. PostgreSQL's
+  `OWNED BY` dependency on a table column is not required or inferred.
+- `function` is also a child of `schema`. Its value must include the exact
+  argument types, including empty parentheses for a zero-argument function;
+  PostgreSQL overloads therefore remain unambiguous. Write argument types as
+  PostgreSQL SQL types, schema-qualifying custom types when needed, e.g.
+  `add(integer, integer)` or `convert(public.source_type)`. PACT resolves the
+  signature against the database catalog before changing grants.
+- `procedure` is another child of `schema`. It uses the same exact-signature
+  syntax as `function` and the same `EXECUTE` privilege, but targets a
+  PostgreSQL procedure.
+- A `permissions` key must be a level present in the target. Each key grants
+  its privileges along the ancestor path to that level. A single access can
+  therefore carry permissions on the `table → column`, `sequence`,
+  `function` and `procedure` branches.
+- `schema`, `table`, `column` and `sequence` accept `*`, meaning every
+  existing object at that level (system schemas `pg_*` and
+  `information_schema` are excluded; tables include views, materialized
+  views, partitioned and foreign tables). `database` cannot be `*`.
+- A privilege on the wrong level (for example `SELECT` on `database`) fails
+  validation.
+
+Read everything in a database:
+
+```yaml
+resources:
+  - analytics-db:
+      database: analytics
+      schema: "*"
+      table: "*"
+      sequence: "*"
+    access:
+      - users:
+          - alice
+        permissions:
+          database:
+            - CONNECT
+          schema:
+            - USAGE
+          table:
+            - SELECT
+          sequence:
+            - USAGE
+```
+
+Read-write on one table and one column:
+
+```yaml
+resources:
+  - analytics-db:
+      database: analytics
+      schema: sales
+      table: orders
+      column: email
+    access:
+      - users:
+          - bob
+        permissions:
+          table:
+            - SELECT
+          column:
+            - UPDATE
+```
+
+Grant execute on one exact function overload:
+
+```yaml
+resources:
+  - analytics-db:
+      database: analytics
+      schema: sales
+      table: orders
+      function: calculate_discount(numeric, text)
+    access:
+      - users:
+          - app
+        permissions:
+          table:
+            - SELECT
+          function:
+            - EXECUTE
+```
+
+Grant execute on one exact procedure overload:
+
+```yaml
+resources:
+  - analytics-db:
+      database: analytics
+      schema: sales
+      procedure: refresh_orders(date)
+    access:
+      - users:
+          - app
+        permissions:
+          procedure:
+            - EXECUTE
+```
+
+`*` is expanded when PACT reconciles, so tables, columns and sequences created
+later are not covered until the next reconciliation of that resource.
+PostgreSQL's `ALTER DEFAULT PRIVILEGES` is not managed. Column-level and
+table-level grants are independent; a table-level privilege already covers
+all columns.
+
+## Configuration
 
 Configure a PostgreSQL backend per cluster/connection. The backend `id` is
 the service block name in `DataAccess.spec.resources`; `database` names the
@@ -42,27 +167,24 @@ resources:
 
 The PostgreSQL backend factory is registered with Java `ServiceLoader`.
 Settings `jdbc-url`, `username`, and `password` are required. The JDBC URL
-should connect to a maintenance database on the target cluster; database
-names being managed are passed to `GRANT`/`REVOKE` as SQL identifiers.
+identifies the cluster; PACT replaces its database part with each managed
+database, because object-level ACLs live in per-database catalogs. The
+grantor therefore needs `CONNECT` on every managed database. Object names are
+passed to `GRANT`/`REVOKE` as quoted SQL identifiers.
 Inject credentials using the deployment's secret mechanism; do not commit
 real passwords to configuration. The plugin runtime needs pgJDBC
 (`org.postgresql:postgresql`) visible in the plugin class loader.
 
-For the initial version:
+Rules:
 
 - `Access.principal` is the name of an existing PostgreSQL role.
 - `Resource.backendId` selects the configured PostgreSQL connection.
-- `Resource.target.database` selects the database.
-- `Access.attributes.permissions.database` is a set of database privileges.
-- The allow-list is `CONNECT`, `CREATE`, and `TEMPORARY`; `TEMP` is accepted as
-  a case-insensitive alias for `TEMPORARY`.
-- `WITH GRANT OPTION`, `PUBLIC`, role membership, object ownership and
-  schema/table/sequence/function privileges are out of scope.
-- Unknown privilege names and malformed targets must fail validation rather
-  than be interpolated into SQL.
-- An access with an empty or absent `permissions.database` set expresses no
-  grants for that role/database; previously PACT-managed grants in scope are
-  revoked.
+- `WITH GRANT OPTION`, `PUBLIC`, role membership, object ownership,
+  default privileges and identity provisioning are out of scope.
+- Privilege names are case-insensitive; unknown privilege or target names
+  fail validation rather than being interpolated into SQL.
+- An access with no permissions expresses no grants for that role/target;
+  previously PACT-managed grants in scope are revoked.
 
 ## Grant ownership contract
 
@@ -76,7 +198,7 @@ reconciling PACT backend for overlapping databases. Otherwise those grants
 cannot be distinguished from PACT-owned state.
 
 The grantor must already have sufficient authority to grant/revoke the
-configured database privileges and connect to the maintenance database. The
+configured privileges and connect to every managed database. The
 backend does not create roles, databases, or grant options. If it encounters a
 grant-option ACL entry from its own grantor, reconciliation fails closed
 rather than taking ownership of a capability outside the contract. A revoke
@@ -84,7 +206,8 @@ that would invalidate dependent delegated grants can fail under PostgreSQL's
 default `RESTRICT`; PACT does not use `CASCADE`.
 
 Only databases named by the previous or desired PACT state are in a
-reconciliation's scope. This allows deletion of the final access for a
+reconciliation's scope; within such a database all schemas, tables and
+columns (except system schemas) are in scope. This allows deletion of the final access for a
 database to clean its PACT grants without touching unrelated databases. It
 also means grants manually created by the dedicated grantor in an in-scope
 database are considered managed and may be revoked when absent from desired
@@ -94,10 +217,10 @@ The backend does not promise exact effective privileges: ownership,
 `PUBLIC`, role memberships, defaults, and grants from other grantors can still
 confer access. No role provisioning or password change is performed.
 
-Database privileges do not imply data access by themselves. For example,
-`CONNECT` permits connecting to the database; schema `USAGE` and object-level
-privileges such as table `SELECT` are separate grants and are not yet in the
-initial contract.
+Privileges at different levels are independent: `CONNECT` does not give
+schema `USAGE`, and schema `USAGE` does not give table `SELECT`. Declare each
+level that is needed. Reconciliation is atomic per database; across databases
+PACT relies on the backend transaction's compensation.
 
 ## Row-level security: proposed model
 
@@ -247,8 +370,7 @@ PostgreSQL documents these semantics in
 [Row Security Policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html),
 [CREATE POLICY](https://www.postgresql.org/docs/current/sql-createpolicy.html),
 and [ALTER TABLE](https://www.postgresql.org/docs/current/sql-altertable.html).
-RLS support remains a design proposal; the current module does not implement
-grants, RLS, or a PostgreSQL backend plugin.
+RLS support remains a design proposal and is not implemented.
 
 ## Reconciliation and ownership boundary
 
@@ -269,9 +391,8 @@ an explicit strategy for identifying PACT-owned grants and must document the
 grant-manager role's required permissions. Exact effective-access enforcement
 is not promised by this narrow contract.
 
-The first connection is to a maintenance database in the configured
-PostgreSQL cluster. PostgreSQL roles are cluster-wide, while database
-privileges name a database in that cluster. Deployment-specific constraints
+PostgreSQL roles are cluster-wide, while privileges name objects inside one
+database of that cluster. Deployment-specific constraints
 (for example, managed PostgreSQL products that restrict grant authority) need
 integration coverage before being claimed as supported.
 

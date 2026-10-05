@@ -9,8 +9,9 @@ import io.github.pactproject.api.exception.ValidationException;
 import io.github.pactproject.api.value.Value;
 import io.github.pactproject.postgresql.api.PostgreSqlClient;
 import io.github.pactproject.postgresql.api.PostgreSqlClientException;
-import io.github.pactproject.postgresql.model.DatabaseGrant;
-import io.github.pactproject.postgresql.model.DatabasePrivilege;
+import io.github.pactproject.postgresql.model.Grant;
+import io.github.pactproject.postgresql.model.GrantTarget;
+import io.github.pactproject.postgresql.model.Privilege;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
@@ -25,9 +26,9 @@ class PostgreSqlBackendTest {
     @Test
     void appliesDesiredStateAndCompensatesToSnapshot() throws Exception {
         FakeClient client = new FakeClient();
-        DatabaseGrant existing = grant("analytics", "alice", DatabasePrivilege.CONNECT);
+        Grant existing = grant("analytics", "alice", Privilege.CONNECT);
         client.actual.add(existing);
-        DatabaseGrant unrelated = grant("unmanaged", "bob", DatabasePrivilege.CREATE);
+        Grant unrelated = grant("unmanaged", "bob", Privilege.CREATE);
         client.actual.add(unrelated);
         PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
 
@@ -38,7 +39,7 @@ class PostgreSqlBackendTest {
         transaction.apply();
         assertEquals(
                 Set.of(
-                        grant("analytics", "alice", DatabasePrivilege.CREATE),
+                        grant("analytics", "alice", Privilege.CREATE),
                         unrelated
                 ),
                 client.actual
@@ -51,7 +52,7 @@ class PostgreSqlBackendTest {
     @Test
     void removesStaleGrantsWhenDesiredDatabaseHasNoPermissions() throws Exception {
         FakeClient client = new FakeClient();
-        client.actual.add(grant("analytics", "alice", DatabasePrivilege.CONNECT));
+        client.actual.add(grant("analytics", "alice", Privilege.CONNECT));
         PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
 
         PactState previous = state("alice", "analytics", "CONNECT");
@@ -113,35 +114,35 @@ class PostgreSqlBackendTest {
         )));
     }
 
-    private static DatabaseGrant grant(
+    private static Grant grant(
             String database,
             String role,
-            DatabasePrivilege privilege
+            Privilege privilege
     ) {
-        return new DatabaseGrant(database, role, privilege);
+        return new Grant(new GrantTarget(database, null, null, null), role, privilege);
     }
 
     private static final class FakeClient implements PostgreSqlClient {
-        private final Set<DatabaseGrant> actual = new HashSet<>();
+        private final Set<Grant> actual = new HashSet<>();
         private boolean failOnRead;
 
         @Override
-        public Set<DatabaseGrant> getManagedGrants(Set<String> databases)
+        public Set<Grant> getManagedGrants(Set<String> databases)
                 throws PostgreSqlClientException {
             if (failOnRead) {
                 throw new PostgreSqlClientException("test read failure");
             }
             return actual.stream()
-                    .filter(grant -> databases.contains(grant.database()))
+                    .filter(grant -> databases.contains(grant.target().database()))
                     .collect(Collectors.toUnmodifiableSet());
         }
 
         @Override
         public void synchronize(
                 Set<String> databases,
-                Set<DatabaseGrant> desired
+                Set<Grant> desired
         ) {
-            actual.removeIf(grant -> databases.contains(grant.database()));
+            actual.removeIf(grant -> databases.contains(grant.target().database()));
             actual.addAll(desired);
         }
     }

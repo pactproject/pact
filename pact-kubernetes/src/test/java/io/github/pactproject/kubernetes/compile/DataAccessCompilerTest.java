@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -494,29 +495,118 @@ class DataAccessCompilerTest
     }
 
     @Test
-    void rejectsNonScalarTarget()
+    void expandsTargetListsAsCartesianProduct()
+    {
+        PactState state = compiler.compile(
+                List.of(Map.of(
+                        "resources",
+                        List.of(Map.of(
+                                "postgres",
+                                Map.of(
+                                        "database", List.of("sales", "archive"),
+                                        "schema", List.of("public", "audit"),
+                                        "table", "orders",
+                                        "column", List.of("id", "email")
+                                ),
+                                "access",
+                                List.of(Map.of(
+                                        "users", List.of("alice", "bob"),
+                                        "permissions", Map.of(
+                                                "column", List.of("SELECT")
+                                        )
+                                ))
+                        ))
+                ))
+        );
+
+        Set<Map<String, String>> expectedTargets = new HashSet<>();
+        for (String database : List.of("sales", "archive")) {
+            for (String schema : List.of("public", "audit")) {
+                for (String column : List.of("id", "email")) {
+                    expectedTargets.add(Map.of(
+                            "database", database,
+                            "schema", schema,
+                            "table", "orders",
+                            "column", column
+                    ));
+                }
+            }
+        }
+        assertEquals(16, state.accesses().size());
+        assertEquals(
+                expectedTargets,
+                state.accesses().stream()
+                        .map(access -> access.resource().target())
+                        .collect(java.util.stream.Collectors.toSet())
+        );
+        assertEquals(
+                Set.of("alice", "bob"),
+                state.accesses().stream()
+                        .map(Access::principal)
+                        .collect(java.util.stream.Collectors.toSet())
+        );
+    }
+
+    @Test
+    void expandsRegistryNameList()
+    {
+        PactState state = compiler.compile(
+                List.of(Map.of(
+                        "resources",
+                        List.of(Map.of(
+                                "registry",
+                                Map.of("name", List.of("repo-a", "repo-b")),
+                                "access",
+                                List.of(Map.of(
+                                        "users", List.of("alice"),
+                                        "permissions", List.of("read")
+                                ))
+                        ))
+                ))
+        );
+
+        assertEquals(
+                Set.of(
+                        Map.of("repository", "repo-a"),
+                        Map.of("repository", "repo-b")
+                ),
+                state.accesses().stream()
+                        .map(access -> access.resource().target())
+                        .collect(java.util.stream.Collectors.toSet())
+        );
+    }
+
+    @Test
+    void rejectsEmptyAndNestedTargetLists()
     {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> compiler.compile(
-                        List.of(
-                                Map.of(
-                                        "resources",
-                                        List.of(
-                                                Map.of(
-                                                        "ozone",
-                                                        Map.of(
-                                                                "volume",
-                                                                List.of(
-                                                                        "data"
-                                                                )
-                                                        ),
-                                                        "access",
-                                                        List.of()
-                                                )
-                                        )
-                                )
-                        )
+                        List.of(Map.of(
+                                "resources",
+                                List.of(Map.of(
+                                        "postgres",
+                                        Map.of("database", List.of()),
+                                        "access",
+                                        List.of()
+                                ))
+                        ))
+                )
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> compiler.compile(
+                        List.of(Map.of(
+                                "resources",
+                                List.of(Map.of(
+                                        "postgres",
+                                        Map.of("database", List.of(
+                                                List.of("sales")
+                                        )),
+                                        "access",
+                                        List.of()
+                                ))
+                        ))
                 )
         );
     }

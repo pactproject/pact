@@ -8,6 +8,7 @@ import io.github.pactproject.api.value.Value;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -81,41 +82,44 @@ public final class DataAccessCompiler
         }
 
         String backendId = findBackendId(resource);
+        List<Object> accessItemSnapshot = new ArrayList<>();
+        accessItems.forEach(accessItemSnapshot::add);
 
-        Map<String, String> target;
+        List<Map<String, String>> targets;
         if (backendId.equals(REGISTRY_SERVICE)) {
             Object targetValue = resource.get(backendId);
             if (!(targetValue instanceof Map<?, ?> registryTarget)
-                    || !registryTarget.keySet().equals(Set.of("name"))
-                    || !(registryTarget.get("name") instanceof String name)
-                    || name.isBlank()) {
+                    || !registryTarget.keySet().equals(Set.of("name"))) {
                 throw invalid(
-                        "Registry service requires only a non-empty name field"
+                        "Registry service requires only a name field"
                 );
             }
-            target = Map.of("repository", name);
+            Map<String, Object> registryFields = new HashMap<>();
+            registryFields.put("repository", registryTarget.get("name"));
+            targets = targetCombinations(registryFields);
         }
         else {
-            target = parseTarget(resource.get(backendId));
+            targets = parseTarget(resource.get(backendId));
         }
-
-        Resource pactResource = new Resource(backendId, target);
 
         Set<Access> result = new HashSet<>();
 
-        for (Object accessItem : accessItems) {
-            if (!(accessItem instanceof Map<?, ?> access)) {
-                throw invalid(
-                        "DataAccess access item must be an object"
+        for (Map<String, String> target : targets) {
+            Resource pactResource = new Resource(backendId, target);
+            for (Object accessItem : accessItemSnapshot) {
+                if (!(accessItem instanceof Map<?, ?> access)) {
+                    throw invalid(
+                            "DataAccess access item must be an object"
+                    );
+                }
+
+                result.addAll(
+                        compileAccess(
+                                pactResource,
+                                access
+                        )
                 );
             }
-
-            result.addAll(
-                    compileAccess(
-                            pactResource,
-                            access
-                    )
-            );
         }
 
         return result;
@@ -312,7 +316,7 @@ public final class DataAccessCompiler
         return Set.copyOf(result);
     }
 
-    private Map<String, String> parseTarget(
+    private List<Map<String, String>> parseTarget(
             Object targetValue)
     {
         if (!(targetValue instanceof Map<?, ?> target)) {
@@ -321,7 +325,7 @@ public final class DataAccessCompiler
             );
         }
 
-        Map<String, String> result = new HashMap<>();
+        Map<String, Object> targetFields = new HashMap<>();
 
         for (Map.Entry<?, ?> entry : target.entrySet()) {
             if (!(entry.getKey() instanceof String key)) {
@@ -330,27 +334,76 @@ public final class DataAccessCompiler
                 );
             }
 
-            Object value = entry.getValue();
-
-            if (value instanceof String string) {
-                result.put(key, string);
-            }
-            else if (value instanceof Boolean bool) {
-                result.put(key, Boolean.toString(bool));
-            }
-            else if (value instanceof Number number) {
-                result.put(key, number.toString());
-            }
-            else {
-                throw invalid(
-                        "DataAccess target field '"
-                                + key
-                                + "' must be a scalar"
-                );
-            }
+            targetFields.put(key, entry.getValue());
         }
 
-        return result;
+        return targetCombinations(targetFields);
+    }
+
+    private List<Map<String, String>> targetCombinations(
+            Map<String, ?> fields)
+    {
+        List<Map<String, String>> combinations = new ArrayList<>();
+        combinations.add(Map.of());
+
+        for (Map.Entry<String, ?> entry : fields.entrySet()) {
+            List<String> values = targetValues(entry.getKey(), entry.getValue());
+            List<Map<String, String>> expanded = new ArrayList<>();
+            for (Map<String, String> combination : combinations) {
+                for (String value : values) {
+                    Map<String, String> next = new HashMap<>(combination);
+                    next.put(entry.getKey(), value);
+                    expanded.add(Map.copyOf(next));
+                }
+            }
+            combinations = expanded;
+        }
+
+        return List.copyOf(combinations);
+    }
+
+    private List<String> targetValues(String field, Object value)
+    {
+        if (value instanceof String string) {
+            return List.of(string);
+        }
+        if (value instanceof Boolean bool) {
+            return List.of(Boolean.toString(bool));
+        }
+        if (value instanceof Number number) {
+            return List.of(number.toString());
+        }
+        if (value instanceof Iterable<?> iterable) {
+            Set<String> values = new LinkedHashSet<>();
+            for (Object item : iterable) {
+                if (item instanceof String string) {
+                    values.add(string);
+                }
+                else if (item instanceof Boolean bool) {
+                    values.add(Boolean.toString(bool));
+                }
+                else if (item instanceof Number number) {
+                    values.add(number.toString());
+                }
+                else {
+                    throw invalid(
+                            "DataAccess target field '" + field
+                                    + "' must contain only scalar values"
+                    );
+                }
+            }
+            if (values.isEmpty()) {
+                throw invalid(
+                        "DataAccess target field '" + field
+                                + "' must not be an empty array"
+                );
+            }
+            return List.copyOf(values);
+        }
+        throw invalid(
+                "DataAccess target field '" + field
+                        + "' must be a scalar or an array of scalars"
+        );
     }
 
     private static IllegalArgumentException invalid(

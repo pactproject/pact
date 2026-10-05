@@ -1,13 +1,13 @@
 package io.github.pactproject.postgresql.api;
 
-import io.github.pactproject.postgresql.model.DatabaseGrant;
+import io.github.pactproject.postgresql.model.Grant;
 
 import java.util.Set;
 
 public interface PostgreSqlClient {
-    Set<DatabaseGrant> getManagedGrants(Set<String> databases)
+    Set<Grant> getManagedGrants(Set<String> databases)
             throws PostgreSqlClientException;
 
-    void synchronize(Set<String> databases, Set<DatabaseGrant> desired)
+    void synchronize(Set<String> databases, Set<Grant> desired)
             throws PostgreSqlClientException;
 }
