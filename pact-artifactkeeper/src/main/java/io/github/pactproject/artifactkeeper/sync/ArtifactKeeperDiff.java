@@ -68,6 +68,7 @@ public final class ArtifactKeeperDiff {
         for (ActualArtifactKeeperPermission permission : permissions) {
             Key key = new Key(
                     permission.repository(),
+                    permission.principalType(),
                     permission.username()
             );
 
@@ -89,6 +90,7 @@ public final class ArtifactKeeperDiff {
         for (ArtifactKeeperPermission permission : permissions) {
             Key key = new Key(
                     permission.repository(),
+                    permission.principalType(),
                     permission.username()
             );
 
@@ -109,6 +111,7 @@ public final class ArtifactKeeperDiff {
         return new ActualArtifactKeeperPermission(
                 first.id(),
                 first.repository(),
+                first.principalType(),
                 first.username(),
                 union(first.actions(), second.actions())
         );
@@ -120,6 +123,7 @@ public final class ArtifactKeeperDiff {
     ) {
         return new ArtifactKeeperPermission(
                 first.repository(),
+                first.principalType(),
                 first.username(),
                 union(first.actions(), second.actions())
         );
@@ -136,6 +140,7 @@ public final class ArtifactKeeperDiff {
 
     private record Key(
             String repository,
+            String principalType,
             String username
     ) {
     }

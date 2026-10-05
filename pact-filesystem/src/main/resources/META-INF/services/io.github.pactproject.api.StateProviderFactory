@@ -1,1 +1,1 @@
-io.github.pactproject.api.StateProviderFactory
+io.github.pactproject.filesystem.FileSystemStateProviderFactory

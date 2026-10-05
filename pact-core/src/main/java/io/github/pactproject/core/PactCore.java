@@ -3,6 +3,7 @@ package io.github.pactproject.core;
 import io.github.pactproject.api.Access;
 import io.github.pactproject.api.Backend;
 import io.github.pactproject.api.BackendTransaction;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.exception.BackendException;
 import io.github.pactproject.core.exception.ApplyException;
@@ -128,7 +129,7 @@ public final class PactCore {
             }
         }
 
-        appliedState = desiredState;
+        appliedState = desiredState.withoutSecrets();
 
         log.info(
                 "Successfully applied desired state to all backends"
@@ -144,7 +145,7 @@ public final class PactCore {
         }
 
         validateBackends(restoredState);
-        appliedState = restoredState;
+        appliedState = restoredState.withoutSecrets();
     }
 
     private void validateBackends(PactState desiredState)
@@ -159,6 +160,16 @@ public final class PactCore {
                         backendId
                 );
 
+                throw new BackendNotFoundException(backendId);
+            }
+        }
+        for (var identity : desiredState.identities()) {
+            var backendId = identity.backendId();
+            if (!backends.containsKey(backendId)) {
+                log.error(
+                        "Unknown backend '{}' referenced by identity",
+                        backendId
+                );
                 throw new BackendNotFoundException(backendId);
             }
         }
@@ -243,21 +254,38 @@ public final class PactCore {
     private Map<String, PactState> groupByBackend(
             PactState state
     ) {
-        var grouped = new LinkedHashMap<String, Set<Access>>();
+        var groupedAccesses = new LinkedHashMap<String, Set<Access>>();
+        var groupedIdentities = new LinkedHashMap<String, Set<Identity>>();
 
         for (var access : state.accesses()) {
             var backendId = access.resource().backendId();
 
-            grouped.computeIfAbsent(
+            groupedAccesses.computeIfAbsent(
                     backendId,
                     _ -> new HashSet<>()
             ).add(access);
         }
 
-        return grouped.entrySet().stream()
-                .collect(Collectors.toUnmodifiableMap(
-                        Map.Entry::getKey,
-                        e -> new PactState(e.getValue())
-                ));
+        for (var identity : state.identities()) {
+            groupedIdentities.computeIfAbsent(
+                    identity.backendId(),
+                    _ -> new HashSet<>()
+            ).add(identity);
+        }
+
+        var backendIds = new HashSet<String>();
+        backendIds.addAll(groupedAccesses.keySet());
+        backendIds.addAll(groupedIdentities.keySet());
+        var result = new LinkedHashMap<String, PactState>();
+        for (var backendId : backendIds) {
+            result.put(
+                    backendId,
+                    new PactState(
+                            groupedAccesses.getOrDefault(backendId, Set.of()),
+                            groupedIdentities.getOrDefault(backendId, Set.of())
+                    )
+            );
+        }
+        return Map.copyOf(result);
     }
 }

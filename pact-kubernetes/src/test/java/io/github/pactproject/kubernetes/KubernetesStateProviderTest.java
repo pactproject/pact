@@ -2,10 +2,13 @@ package io.github.pactproject.kubernetes;
 
 import io.fabric8.kubernetes.api.model.GenericKubernetesResource;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
+import io.fabric8.kubernetes.api.model.Secret;
+import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.github.pactproject.api.exception.StateProviderException;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.exception.StateReconciliationException;
 import io.github.pactproject.api.StateReconciler;
@@ -13,6 +16,8 @@ import io.github.pactproject.kubernetes.compile.DataAccessCompiler;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -227,6 +232,176 @@ class KubernetesStateProviderTest
     }
 
     @Test
+    void resolvesPasswordSecretTransientlyAndRestoresOnlyItsVersion()
+            throws Exception
+    {
+        var reconciler = new RecordingReconciler();
+        var provider = new KubernetesStateProvider(kubernetesClient);
+        Map<String, ?> spec = identitySpec(false);
+        String secretVersion = createSecret(
+                "default",
+                "app-credentials",
+                "password",
+                "s3cret"
+        );
+
+        provider.start(reconciler);
+        createDataAccess("default", "identity", spec);
+        GenericKubernetesResource applied = awaitDataAccess(
+                "default",
+                "identity",
+                resource -> statusPhase(resource).equals("Ready")
+        );
+
+        Identity identity = reconciler.appliedStates.getFirst()
+                .identities()
+                .iterator()
+                .next();
+        assertEquals("s3cret", identity.password().reveal());
+        assertEquals(secretVersion, identity.passwordVersion());
+        assertEquals(
+                "default/app-credentials/password",
+                identity.passwordSource()
+        );
+        assertEquals(spec, status(applied).get("lastAppliedSpec"));
+        assertTrue(!status(applied).toString().contains("s3cret"));
+
+        var restoreReconciler = new RecordingReconciler();
+        var restarted = new KubernetesStateProvider(kubernetesClient);
+        restarted.start(restoreReconciler);
+
+        Identity restored = restoreReconciler.restoredState
+                .identities()
+                .iterator()
+                .next();
+        assertEquals(secretVersion, restored.passwordVersion());
+        assertEquals(null, restored.password());
+        assertTrue(!restoreReconciler.restoredState.toString().contains("s3cret"));
+        restarted.close();
+        provider.close();
+    }
+
+    @Test
+    void secretChangesApplyOnlyAfterDataAccessGenerationChanges()
+            throws Exception
+    {
+        var reconciler = new RecordingReconciler();
+        var provider = new KubernetesStateProvider(kubernetesClient);
+        createSecret("default", "app-credentials", "password", "first");
+        provider.start(reconciler);
+        createDataAccess("default", "identity", identitySpec(false));
+        awaitDataAccess(
+                "default",
+                "identity",
+                resource -> statusPhase(resource).equals("Ready")
+        );
+        awaitAppliedStateCount(reconciler, 1);
+
+        replaceSecret("default", "app-credentials", "password", "rotated");
+        Thread.sleep(300L);
+        assertEquals(1, reconciler.appliedStates.size());
+
+        GenericKubernetesResource resource =
+                kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                        .inNamespace("default")
+                        .withName("identity")
+                        .get();
+        resource.setAdditionalProperty("spec", identitySpec(true));
+        resource.getMetadata().setGeneration(
+                resource.getMetadata().getGeneration() + 1
+        );
+        kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                .inNamespace("default")
+                .resource(resource)
+                .update();
+
+        GenericKubernetesResource applied = awaitDataAccess(
+                "default",
+                "identity",
+                candidate -> statusPhase(candidate).equals("Ready")
+                        && statusNumber(candidate, "observedGeneration")
+                        == resource.getMetadata().getGeneration()
+        );
+        awaitAppliedStateCount(reconciler, 2);
+        Identity identity = reconciler.appliedStates.getLast()
+                .identities()
+                .iterator()
+                .next();
+        assertEquals("rotated", identity.password().reveal());
+        assertTrue(!status(applied).toString().contains("rotated"));
+        provider.close();
+    }
+
+    @Test
+    void missingPasswordSecretMarksDataAccessErrorWithoutApplying()
+            throws Exception
+    {
+        var reconciler = new RecordingReconciler();
+        var provider = new KubernetesStateProvider(kubernetesClient);
+        provider.start(reconciler);
+        createDataAccess(
+                "default",
+                "missing-identity-secret",
+                Map.of(
+                        "resources", List.of(),
+                        "identities", List.of(Map.of(
+                                "backend", "postgres",
+                                "name", "app",
+                                "passwordSecretRef", Map.of(
+                                        "name", "missing",
+                                        "key", "password"
+                                )
+                        ))
+                )
+        );
+
+        GenericKubernetesResource failed = awaitDataAccess(
+                "default",
+                "missing-identity-secret",
+                resource -> statusPhase(resource).equals("Error")
+        );
+        assertTrue(status(failed).get("lastError").toString()
+                .contains("does not exist"));
+        assertTrue(reconciler.appliedStates.isEmpty());
+        assertTrue(!status(failed).toString().contains("password"));
+        provider.close();
+    }
+
+    @Test
+    void rejectsIdentityDeclaredByMultipleDataAccessResources()
+    {
+        Map<String, ?> spec = Map.of(
+                "resources", List.of(),
+                "identities", List.of(Map.of(
+                        "backend", "postgres",
+                        "name", "app"
+                ))
+        );
+        createDataAccess("default", "identity-a", spec);
+        createDataAccess("default", "identity-b", spec);
+        KubernetesStateProvider provider =
+                new KubernetesStateProvider(kubernetesClient);
+
+        assertThrows(StateProviderException.class, provider::load);
+    }
+
+    private Map<String, ?> identitySpec(boolean ensure)
+    {
+        return Map.of(
+                "resources", List.of(),
+                "identities", List.of(Map.of(
+                        "backend", "postgres",
+                        "name", "app",
+                        "ensure", ensure,
+                        "passwordSecretRef", Map.of(
+                                "name", "app-credentials",
+                                "key", "password"
+                        )
+                ))
+        );
+    }
+
+    @Test
     void validationFailureSetsErrorWithoutApplying()
             throws Exception
     {
@@ -360,6 +535,57 @@ class KubernetesStateProviderTest
                 .inNamespace(namespace)
                 .resource(dataAccess(namespace, name, spec))
                 .create();
+    }
+
+    private String createSecret(
+            String namespace,
+            String name,
+            String key,
+            String value)
+    {
+        Secret secret = new SecretBuilder()
+                .withMetadata(new ObjectMetaBuilder()
+                        .withName(name)
+                        .withNamespace(namespace)
+                        .build())
+                .withData(Map.of(
+                        key,
+                        Base64.getEncoder().encodeToString(
+                                value.getBytes(StandardCharsets.UTF_8)
+                        )
+                ))
+                .build();
+        kubernetesClient.secrets()
+                .inNamespace(namespace)
+                .resource(secret)
+                .create();
+        Secret created = kubernetesClient.secrets()
+                .inNamespace(namespace)
+                .withName(name)
+                .get();
+        return created.getMetadata().getResourceVersion();
+    }
+
+    private void replaceSecret(
+            String namespace,
+            String name,
+            String key,
+            String value)
+    {
+        Secret secret = kubernetesClient.secrets()
+                .inNamespace(namespace)
+                .withName(name)
+                .get();
+        secret.setData(Map.of(
+                key,
+                Base64.getEncoder().encodeToString(
+                        value.getBytes(StandardCharsets.UTF_8)
+                )
+        ));
+        kubernetesClient.secrets()
+                .inNamespace(namespace)
+                .resource(secret)
+                .update();
     }
 
     private GenericKubernetesResource dataAccess(

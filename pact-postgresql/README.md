@@ -2,11 +2,8 @@
 
 `pact-postgresql` provides a plugin backend for PostgreSQL privileges over
 JDBC at database, schema, table, column, sequence, function and procedure
-levels.
-Row-level security and identity/password provisioning remain out of scope.
-
-Role/identity provisioning is a separate design concern described below; it is
-not part of the grant compiler.
+levels. It also reconciles explicitly declared PostgreSQL role identities and
+their optional passwords independently of grants.
 
 ## Access contract
 
@@ -178,9 +175,21 @@ real passwords to configuration. The plugin runtime needs pgJDBC
 Rules:
 
 - `Access.principal` is the name of an existing PostgreSQL role.
+- `DataAccess.spec.identities` may declare roles for this backend. `ensure`
+  defaults to `false`; when true, PACT creates a missing role with `LOGIN`.
+  Existing roles must have `LOGIN` when PACT is asked to set a password; PACT
+  does not change existing role attributes. Removing an identity declaration
+  does not drop the role.
+- An optional Kubernetes `passwordSecretRef` sets the role password. PACT
+  applies a changed Secret resource version on the next reconciliation of the
+  declaring `DataAccess`; it does not watch Secrets. Password changes are not
+  rolled back if a later grant operation fails. PACT reports the failure and
+  applies the declarative state on retry.
+- Role password management is separate from the JDBC credentials PACT uses
+  for its own connection to PostgreSQL.
 - `Resource.backendId` selects the configured PostgreSQL connection.
 - `WITH GRANT OPTION`, `PUBLIC`, role membership, object ownership,
-  default privileges and identity provisioning are out of scope.
+  default privileges and row-level security are out of scope.
 - Privilege names are case-insensitive; unknown privilege or target names
   fail validation rather than being interpolated into SQL.
 - An access with no permissions expresses no grants for that role/target;
@@ -199,8 +208,8 @@ cannot be distinguished from PACT-owned state.
 
 The grantor must already have sufficient authority to grant/revoke the
 configured privileges and connect to every managed database. The
-backend does not create roles, databases, or grant options. If it encounters a
-grant-option ACL entry from its own grantor, reconciliation fails closed
+grants reconciler does not create databases or grant options. If it encounters
+a grant-option ACL entry from its own grantor, reconciliation fails closed
 rather than taking ownership of a capability outside the contract. A revoke
 that would invalidate dependent delegated grants can fail under PostgreSQL's
 default `RESTRICT`; PACT does not use `CASCADE`.
@@ -213,9 +222,9 @@ also means grants manually created by the dedicated grantor in an in-scope
 database are considered managed and may be revoked when absent from desired
 state.
 
-The backend does not promise exact effective privileges: ownership,
+The grants reconciler does not promise exact effective privileges: ownership,
 `PUBLIC`, role memberships, defaults, and grants from other grantors can still
-confer access. No role provisioning or password change is performed.
+confer access.
 
 Privileges at different levels are independent: `CONNECT` does not give
 schema `USAGE`, and schema `USAGE` does not give table `SELECT`. Declare each
@@ -378,86 +387,43 @@ The backend compiles `PactState` into desired direct grants, reads actual
 grants, calculates a normalized diff, and applies `GRANT`/`REVOKE` statements
 in a JDBC transaction. A prepared `BackendTransaction` snapshots the actual
 PACT-owned grants in scope to compensate if another backend fails during a
-PACT reconciliation. Database and role identifiers are quoted as SQL
-identifiers with embedded quotes escaped; they are not interpolated as
-unquoted SQL. Passwords and credential-bearing JDBC URLs are not logged.
-
-PostgreSQL effective privileges can come from direct grants, grants to
-`PUBLIC`, inherited role memberships, or object ownership. PACT should manage
-only direct grants that it owns, not infer ownership of every effective
-privilege. In particular, removing a desired `CONNECT` grant must not revoke a
-pre-existing grant from `PUBLIC` or another grantor. The implementation needs
-an explicit strategy for identifying PACT-owned grants and must document the
-grant-manager role's required permissions. Exact effective-access enforcement
-is not promised by this narrow contract.
+PACT reconciliation. The configured database login is the grantor identity:
+the backend reads and reconciles only ACL entries issued by that login. It does
+not infer ownership of privileges from `PUBLIC`, role membership, or object
+ownership. Database and role identifiers are quoted as SQL identifiers with
+embedded quotes escaped; they are not interpolated as unquoted SQL. Passwords
+and credential-bearing JDBC URLs are not logged.
 
 PostgreSQL roles are cluster-wide, while privileges name objects inside one
 database of that cluster. Deployment-specific constraints
 (for example, managed PostgreSQL products that restrict grant authority) need
 integration coverage before being claimed as supported.
 
-## Identity provisioning: proposed separate domain
+## Identity reconciliation
 
-Creating login roles and managing passwords is intentionally separate from
-compiling `Access` into database grants:
+Identity declarations live at `DataAccess.spec.identities`, independently of
+the `resources` grants list. They are backend-neutral in PACT's state model;
+this PostgreSQL plugin reconciles only identities whose backend id matches its
+configured id. The PostgreSQL role name is cluster-wide. The JDBC account must
+have permission to inspect and, when `ensure: true`, create roles and set
+passwords (for example, `CREATEROLE` where permitted by the server).
 
-- A future `DataIdentity` resource would declare an identity independently of
-  any one `DataAccess`. `DataAccess` would continue to refer to the PostgreSQL
-  role name in `users`; it would not silently create a role placeholder.
-- A future identity mode could distinguish an externally managed/existing
-  role from a PACT-managed login role. The exact schema and ownership contract
-  remain to be decided.
-- A role must exist before its grants can be applied. If an access references
-  an identity that is not present, reconciliation should wait or report a
-  clear dependency error and retry after identity changes; it must not silently
-  create a role as a side effect of permission compilation.
-- An identity could refer to an existing Kubernetes Secret or ask PACT to
-  generate a password into a named Secret. The password must never be embedded
-  in the identity spec/status, `PactState`, logs, or `lastAppliedSpec`.
-- Generated credentials must survive controller restarts and be delivered to
-  consumers. Kubernetes Secret RBAC and encryption at rest remain deployment
-  responsibilities; a Secret's base64 representation is not encryption.
-- PostgreSQL cannot reveal an existing plaintext password. Reconciliation can
-  detect a Secret change and set the new password, but cannot compare a
-  configured password with the server's stored verifier.
-- Identity creation/password changes and database GRANTs span separate
-  operations and cannot share an atomic transaction. Their orchestration must
-  be retryable and expose progress/errors without leaking credentials.
-- Identity deletion must not automatically `DROP ROLE` by default. Roles may
-  own objects or have dependencies, and an identity may still be referenced by
-  access resources. A future explicit deletion policy must check references and
-  database dependencies before role removal.
+PACT cannot read an existing role's plaintext password. It applies a password
+when the role is created or when the referenced Secret source/resource version
+changes; it does not compare the desired value to PostgreSQL's stored verifier.
+Role creation and password changes are not compensatable: if a later grant
+operation fails, the password remains changed. The failed DataAccess is marked
+in error and a later reconciliation retries the declarative state. Removing an
+identity does not drop the role.
 
-An alternative is having each `DataAccess` create a role placeholder and a
-later identity object attach credentials. That is technically possible in
-PostgreSQL, but splits lifecycle ownership across resources and makes deletion
-and adoption ambiguous. It is therefore not the default design; revisit only
-if a concrete workflow requires grants to predate identity declarations.
+## Testing
 
-Because PostgreSQL roles are cluster-wide, identity provisioning may need
-separate administrative credentials/permissions from the grant manager. A
-future design should decide whether provisioning is a distinct backend
-capability or a coordinated identity provider executed before authorization
-backends, with grants removed before any managed role can be deleted.
-
-## Planned module layout
-
-The implementation can follow existing PACT plugin conventions:
-
-```text
-pact-postgresql/
-  config/       PostgreSQL connection and grant-manager settings
-  client/       JDBC connection lifecycle and PostgreSQL metadata access
-  compile/      PactState to validated desired grants
-  sync/         owned-grant discovery, diff and GRANT/REVOKE application
-  PostgreSqlBackend.java
-  PostgreSqlBackendFactory.java
-  src/main/resources/META-INF/services/io.github.pactproject.api.BackendFactory
-```
-
-Unit tests should cover compilation, SQL identifier escaping, grant ownership,
-normalization and rollback. Opt-in integration tests should use a disposable
-PostgreSQL cluster and verify database grants through PostgreSQL's privilege
-inspection functions as well as through actual connection/permission checks.
-Identity provisioning tests should be added only after its resource and Secret
-contract is agreed.
+The backend has unit tests for grant compilation, synchronization, JDBC
+behavior, and role identity reconciliation. Its opt-in
+`PostgreSqlLiveIntegrationTest` creates a uniquely named temporary database
+and role, verifies direct grants across PostgreSQL object levels, updates
+grants and the role password, tests login with the new password, and removes
+the temporary database and role. Run it only against a disposable cluster
+with a test login that has `CREATEDB` and `CREATEROLE`; see
+[`INTEGRATION_TESTS.md`](../INTEGRATION_TESTS.md). The local Compose `tests`
+profile runs this test against its disposable PostgreSQL service.

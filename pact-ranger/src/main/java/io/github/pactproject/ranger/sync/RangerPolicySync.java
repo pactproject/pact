@@ -41,35 +41,58 @@ public final class RangerPolicySync {
     private final RangerClient client;
     private final String serviceName;
     private final int pageSize;
+    private final boolean managedOnly;
 
     public RangerPolicySync(
             RangerClient client,
             String serviceName,
             int pageSize
     ) {
+        this(client, serviceName, pageSize, false);
+    }
+
+    public RangerPolicySync(
+            RangerClient client,
+            String serviceName,
+            int pageSize,
+            boolean managedOnly
+    ) {
         this.client = client;
         this.serviceName = serviceName;
         this.pageSize = pageSize;
+        this.managedOnly = managedOnly;
     }
 
-    public List<JsonNode> getManagedPolicies()
+    public List<JsonNode> getPolicies()
             throws RangerClientException {
-        List<JsonNode> managed = client.getPolicies(serviceName, pageSize)
-                .stream()
-                .filter(RangerPolicySync::isManaged)
-                .toList();
-        indexByName(managed);
-        return managed.stream()
+        List<JsonNode> policies = client.getPolicies(serviceName, pageSize);
+        return policies.stream()
                 .map(node -> (JsonNode) node.deepCopy())
                 .toList();
+    }
+
+    public List<JsonNode> getPoliciesInScope()
+            throws RangerClientException {
+        return policiesInScope(getPolicies());
+    }
+
+    private List<JsonNode> policiesInScope(List<JsonNode> policies) {
+        List<JsonNode> policiesInScope = policies
+                .stream()
+                .filter(policy -> !managedOnly || isManaged(policy))
+                .toList();
+        indexByName(policiesInScope);
+        return policiesInScope;
     }
 
     public void synchronize(
             List<JsonNode> actual,
             List<? extends JsonNode> desired
     ) throws RangerClientException {
-        Map<String, JsonNode> actualByName = indexByName(actual);
+        Map<String, JsonNode> actualByName =
+                indexByName(policiesInScope(actual));
         Map<String, JsonNode> desiredByName = indexByName(desired);
+        rejectUnmanagedNameCollisions(actual, desiredByName);
         List<JsonNode> creates = new ArrayList<>();
         List<Update> updates = new ArrayList<>();
         List<JsonNode> deletes = new ArrayList<>();
@@ -113,6 +136,24 @@ public final class RangerPolicySync {
         }
         for (JsonNode delete : deletes) {
             client.deletePolicy(requiredId(delete));
+        }
+    }
+
+    private void rejectUnmanagedNameCollisions(
+            List<JsonNode> actual,
+            Map<String, JsonNode> desiredByName)
+    {
+        if (!managedOnly) {
+            return;
+        }
+        for (JsonNode policy : actual) {
+            String name = policy.path("name").asText();
+            if (!isManaged(policy) && desiredByName.containsKey(name)) {
+                throw new IllegalArgumentException(
+                        "Desired Ranger policy name collides with an "
+                                + "unmanaged policy: " + name
+                );
+            }
         }
     }
 

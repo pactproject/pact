@@ -1,0 +1,37 @@
+FROM maven:3.9-eclipse-temurin-21
+
+WORKDIR /workspace
+COPY . .
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN sed -i 's/\r$//' /workspace/integration/scripts/*.sh
+
+RUN mvn -B -DskipTests install
+
+RUN set -eu; \
+    mkdir -p /opt/pact/lib /opt/pact/plugins; \
+    for module in pact-app pact-filesystem pact-ranger pact-artifactkeeper pact-postgresql pact-elasticsearch; do \
+      mvn -B -f "${module}/pom.xml" \
+        org.apache.maven.plugins:maven-dependency-plugin:3.7.1:copy-dependencies \
+        -DincludeScope=runtime \
+        -DoutputDirectory=/opt/pact/lib; \
+    done; \
+    cp pact-api/target/pact-api-*.jar /opt/pact/lib/; \
+    cp pact-core/target/pact-core-*.jar /opt/pact/lib/; \
+    cp pact-app/target/pact-app-*.jar /opt/pact/lib/; \
+    cp pact-filesystem/target/pact-filesystem-*.jar /opt/pact/plugins/; \
+    cp pact-ranger/target/pact-ranger-*.jar /opt/pact/plugins/; \
+    cp pact-artifactkeeper/target/pact-artifactkeeper-*.jar /opt/pact/plugins/; \
+    cp pact-postgresql/target/pact-postgresql-*.jar /opt/pact/plugins/; \
+    cp pact-elasticsearch/target/pact-elasticsearch-*.jar /opt/pact/plugins/; \
+    mkdir -p /home/pact/.m2; \
+    cp -a /root/.m2/repository /home/pact/.m2/; \
+    chown -R 10001:10001 /workspace /opt/pact /home/pact
+
+ENV HOME=/home/pact
+USER 10001:10001
+ENTRYPOINT ["java", "--enable-preview", "-cp", "/opt/pact/lib/*", "io.github.pactproject.app.Main"]
+CMD ["/etc/pact/config.yaml", "/opt/pact/plugins"]

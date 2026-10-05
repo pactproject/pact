@@ -12,13 +12,14 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RangerPolicySyncTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
-    void onlyManagedPoliciesAreChangedAndEqualPoliciesAreStable()
+    void defaultScopeReconcilesEveryPolicyInTheConfiguredService()
             throws Exception {
         FakeClient client = new FakeClient();
         client.policies.add(MAPPER.readTree("""
@@ -28,37 +29,91 @@ class RangerPolicySyncTest {
                 {"id":2,"name":"hand-written","policyLabels":["manual"]}
                 """));
         RangerPolicySync sync = new RangerPolicySync(client, "service", 20);
-        ObjectNode desired = (ObjectNode) MAPPER.readTree("""
+        ObjectNode desired = desiredPolicy("new-managed");
+
+        List<JsonNode> snapshot = sync.getPoliciesInScope();
+        sync.synchronize(snapshot, List.of(desired));
+
+        assertEquals(1, client.policies.size());
+        assertEquals("new-managed", client.policies.get(0).path("name").asText());
+        assertEquals(1, client.created);
+        assertEquals(2, client.deleted);
+        assertEquals(List.of("alice"), client.ensuredUsers);
+        assertEquals(
+                List.of(
+                        "ensure:alice",
+                        "create:new-managed",
+                        "delete:2",
+                        "delete:1"
+                ),
+                client.operations
+        );
+
+        List<JsonNode> current = sync.getPolicies();
+        sync.synchronize(current, List.of(desired));
+        assertEquals(1, client.created);
+        assertEquals(0, client.updated);
+        assertEquals(List.of("alice"), client.ensuredUsers);
+        assertEquals(2, client.deleted);
+    }
+
+    @Test
+    void managedOnlyOptInPreservesPoliciesWithoutManagedLabel()
+            throws Exception {
+        FakeClient client = new FakeClient();
+        client.policies.add(MAPPER.readTree("""
+                {"id":1,"name":"old-managed","policyLabels":["managed"]}
+                """));
+        client.policies.add(MAPPER.readTree("""
+                {"id":2,"name":"hand-written","policyLabels":["manual"]}
+                """));
+        RangerPolicySync sync =
+                new RangerPolicySync(client, "service", 20, true);
+        ObjectNode desired = desiredPolicy("new-managed");
+
+        List<JsonNode> snapshot = sync.getPoliciesInScope();
+        assertEquals(1, snapshot.size());
+        sync.synchronize(sync.getPolicies(), List.of(desired));
+
+        assertEquals(2, client.policies.size());
+        assertTrue(client.policies.stream()
+                .anyMatch(policy ->
+                        policy.path("name").asText().equals("hand-written")));
+        assertEquals(1, client.deleted);
+        assertEquals(1, client.created);
+    }
+
+    @Test
+    void managedOnlyOptInReportsNameCollisionWithUnmanagedPolicy()
+            throws Exception {
+        FakeClient client = new FakeClient();
+        client.policies.add(MAPPER.readTree("""
+                {"id":1,"name":"desired-policy","policyLabels":["manual"]}
+                """));
+        RangerPolicySync sync =
+                new RangerPolicySync(client, "service", 20, true);
+        ObjectNode desired = desiredPolicy("desired-policy");
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> sync.synchronize(sync.getPolicies(), List.of(desired))
+        );
+        assertEquals(1, client.policies.size());
+        assertEquals(0, client.deleted);
+        assertEquals(0, client.created);
+    }
+
+    private static ObjectNode desiredPolicy(String name) throws Exception {
+        return (ObjectNode) MAPPER.readTree("""
                 {
-                  "name":"new-managed",
+                  "name":"%s",
                   "service":"service",
                   "serviceType":"ozone",
                   "policyLabels":["managed"],
                   "policyItems":[{"users":["alice"],"accesses":[]}],
                   "resources":{"volume":{"values":["data"],"isExcludes":false,"isRecursive":false}}
                 }
-                """);
-
-        List<JsonNode> snapshot = sync.getManagedPolicies();
-        sync.synchronize(snapshot, List.of(desired));
-
-        assertEquals(2, client.policies.size());
-        assertEquals("hand-written", client.policies.get(0).path("name").asText());
-        assertEquals(1, client.created);
-        assertEquals(1, client.deleted);
-        assertEquals(List.of("alice"), client.ensuredUsers);
-        assertEquals(
-                List.of("ensure:alice", "create:new-managed", "delete:1"),
-                client.operations
-        );
-
-        List<JsonNode> current = sync.getManagedPolicies();
-        sync.synchronize(current, List.of(desired));
-        assertEquals(1, client.created);
-        assertEquals(0, client.updated);
-        assertEquals(List.of("alice"), client.ensuredUsers);
-        assertTrue(client.policies.stream()
-                .anyMatch(policy -> policy.path("name").asText().equals("hand-written")));
+                """.formatted(name));
     }
 
     private static final class FakeClient implements RangerClient {
@@ -92,7 +147,13 @@ class RangerPolicySyncTest {
         }
 
         @Override
-        public JsonNode createPolicy(ObjectNode policy) {
+        public JsonNode createPolicy(ObjectNode policy)
+                throws RangerClientException {
+            if (policies.stream().anyMatch(existing ->
+                    existing.path("name").asText()
+                            .equals(policy.path("name").asText()))) {
+                throw new RangerClientException("duplicate policy name");
+            }
             ObjectNode saved = policy.deepCopy();
             saved.put("id", ids.incrementAndGet());
             policies.add(saved);

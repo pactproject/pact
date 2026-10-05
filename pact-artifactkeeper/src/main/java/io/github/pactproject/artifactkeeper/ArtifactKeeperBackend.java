@@ -165,7 +165,8 @@ public final class ArtifactKeeperBackend
     {
         ArtifactKeeperApiUser user =
                 findOrCreateUser(
-                        permission.username()
+                        permission.username(),
+                        permission.principalType()
                 );
 
         ArtifactKeeperApiRepository repository =
@@ -176,7 +177,7 @@ public final class ArtifactKeeperBackend
         try {
             ArtifactKeeperApiPermission created =
                     client.createPermission(
-                            "user",
+                            permission.principalType(),
                             user.id(),
                             "repository",
                             repository.id(),
@@ -198,14 +199,15 @@ public final class ArtifactKeeperBackend
     }
 
     private ArtifactKeeperApiUser findOrCreateUser(
-            String username)
+            String username,
+            String principalType)
             throws BackendOperationException, ValidationException
     {
         try {
             return state.userByUsername(username);
         }
         catch (IllegalArgumentException e) {
-            if (!username.startsWith("svc-")) {
+            if (!"service_account".equals(principalType)) {
                 throw new ValidationException(
                         "Artifact Keeper user not found: "
                                 + username,

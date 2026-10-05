@@ -7,6 +7,7 @@ import io.github.pactproject.postgresql.model.Privilege;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcPostgreSqlClientTest {
     @Test
@@ -93,6 +94,18 @@ class JdbcPostgreSqlClientTest {
                         ),
                         Privilege.EXECUTE
                 ))
+        );
+    }
+
+    @Test
+    void quotesPasswordAsPostgreSqlEscapeString() throws Exception {
+        assertEquals(
+                "E'pa''ss\\\\word'",
+                JdbcPostgreSqlClient.quotePassword("pa'ss\\word")
+        );
+        assertThrows(
+                java.sql.SQLException.class,
+                () -> JdbcPostgreSqlClient.quotePassword("nul\0byte")
         );
     }
 

@@ -17,6 +17,7 @@ import java.util.Set;
 public final class ArtifactKeeperCompiler {
 
     private static final String ACTIONS_ATTRIBUTE = "actions";
+    private static final String SERVICE_ACCOUNT_PREFIX = "svc-";
 
     private ArtifactKeeperCompiler() {
     }
@@ -34,7 +35,11 @@ public final class ArtifactKeeperCompiler {
                 continue;
             }
 
-            Key key = new Key(repository, access.principal());
+            String username = access.principal();
+            String principalType = username.startsWith(SERVICE_ACCOUNT_PREFIX)
+                    ? "service_account"
+                    : "user";
+            Key key = new Key(repository, principalType, username);
 
             merged
                     .computeIfAbsent(key, ignored -> new HashSet<>())
@@ -44,6 +49,7 @@ public final class ArtifactKeeperCompiler {
         return merged.entrySet().stream()
                 .map(entry -> new ArtifactKeeperPermission(
                         entry.getKey().repository(),
+                        entry.getKey().principalType(),
                         entry.getKey().username(),
                         entry.getValue()
                 ))
@@ -97,6 +103,7 @@ public final class ArtifactKeeperCompiler {
 
     private record Key(
             String repository,
+            String principalType,
             String username
     ) {
     }

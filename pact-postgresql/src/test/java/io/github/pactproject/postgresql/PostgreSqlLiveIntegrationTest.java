@@ -1,0 +1,284 @@
+package io.github.pactproject.postgresql;
+
+import io.github.pactproject.api.Access;
+import io.github.pactproject.api.Identity;
+import io.github.pactproject.api.PactState;
+import io.github.pactproject.api.Resource;
+import io.github.pactproject.api.SecretValue;
+import io.github.pactproject.api.value.Value;
+import io.github.pactproject.postgresql.client.JdbcPostgreSqlClient;
+import io.github.pactproject.postgresql.model.Grant;
+import io.github.pactproject.postgresql.model.GrantTarget;
+import io.github.pactproject.postgresql.model.Privilege;
+import io.github.pactproject.postgresql.model.RoutineSignature;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.postgresql.ds.PGSimpleDataSource;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@EnabledIfSystemProperty(named = "pact.integration", matches = "true")
+class PostgreSqlLiveIntegrationTest {
+    private static final String BACKEND_ID = "postgres-it";
+    private static final String SCHEMA = "pact_it";
+    private static final String TABLE = "probe";
+    private static final String COLUMN = "value";
+    private static final String SEQUENCE = "probe_id_seq";
+    private static final String FUNCTION = "increment";
+    private static final String INITIAL_PASSWORD = "PactIt-initial-password";
+    private static final String UPDATED_PASSWORD = "PactIt-updated-password";
+
+    @Test
+    void reconcilesDatabaseObjectGrantsAndRoleIdentity() throws Exception {
+        PostgreSqlConfig config = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
+                "username", required("PACT_IT_POSTGRESQL_USERNAME"),
+                "password", required("PACT_IT_POSTGRESQL_PASSWORD")
+        ));
+        JdbcPostgreSqlClient client = new JdbcPostgreSqlClient(config);
+        String database = "pact_it_" + UUID.randomUUID().toString()
+                .replace("-", "");
+        String role = "pact_it_role_" + UUID.randomUUID().toString()
+                .replace("-", "");
+        String schemaName = SCHEMA;
+        PostgreSqlBackend backend = new PostgreSqlBackend(BACKEND_ID, client);
+
+        createDatabase(config, database);
+        try {
+            createFixture(config, database, schemaName);
+
+            PactState initial = state(
+                    database,
+                    schemaName,
+                    role,
+                    INITIAL_PASSWORD,
+                    "v1",
+                    Set.of("SELECT")
+            );
+            backend.prepare(PactState.empty(), initial).apply();
+            assertEquals(
+                    expectedGrants(database, schemaName, role, "SELECT"),
+                    client.getManagedGrants(Set.of(database))
+            );
+            assertCanLogin(config, database, role, INITIAL_PASSWORD);
+
+            PactState updated = state(
+                    database,
+                    schemaName,
+                    role,
+                    UPDATED_PASSWORD,
+                    "v2",
+                    Set.of("INSERT")
+            );
+            backend.prepare(initial, updated).apply();
+            assertEquals(
+                    expectedGrants(database, schemaName, role, "INSERT"),
+                    client.getManagedGrants(Set.of(database))
+            );
+            assertCanLogin(config, database, role, UPDATED_PASSWORD);
+
+            backend.prepare(updated, PactState.empty()).apply();
+            assertTrue(client.getManagedGrants(Set.of(database)).isEmpty());
+        }
+        finally {
+            dropDatabaseAndRole(config, database, role);
+        }
+    }
+
+    private static void createDatabase(
+            PostgreSqlConfig config,
+            String database
+    ) throws SQLException {
+        try (Connection connection = adminConnection(config);
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE DATABASE " + quoteIdentifier(database));
+        }
+    }
+
+    private static void createFixture(
+            PostgreSqlConfig config,
+            String database,
+            String schema
+    ) throws SQLException {
+        try (Connection connection = databaseConnection(
+                config,
+                database,
+                config.username(),
+                config.password()
+        ); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA " + quoteIdentifier(schema));
+            statement.execute(
+                    "CREATE TABLE " + quoteIdentifier(schema) + "."
+                            + quoteIdentifier(TABLE)
+                            + " (id bigint GENERATED BY DEFAULT AS IDENTITY, "
+                            + quoteIdentifier(COLUMN) + " text)"
+            );
+            statement.execute(
+                    "CREATE FUNCTION " + quoteIdentifier(schema) + "."
+                            + quoteIdentifier(FUNCTION)
+                            + "(integer) RETURNS integer LANGUAGE SQL "
+                            + "IMMUTABLE AS 'SELECT $1 + 1'"
+            );
+        }
+    }
+
+    private static PactState state(
+            String database,
+            String schema,
+            String role,
+            String password,
+            String passwordVersion,
+            Set<String> tablePrivileges
+    ) {
+        Map<String, String> target = Map.of(
+                "database", database,
+                "schema", schema,
+                "table", TABLE,
+                "column", COLUMN,
+                "sequence", SEQUENCE,
+                "function", FUNCTION + "(integer)"
+        );
+        Map<String, Value> permissions = new HashMap<>();
+        permissions.put("database", Value.set(Set.of(Value.string("CONNECT"))));
+        permissions.put("schema", Value.set(Set.of(Value.string("USAGE"))));
+        permissions.put(
+                "table",
+                Value.set(tablePrivileges.stream().map(Value::string)
+                        .collect(java.util.stream.Collectors.toSet()))
+        );
+        permissions.put("column", Value.set(Set.of(Value.string("UPDATE"))));
+        permissions.put("sequence", Value.set(Set.of(Value.string("USAGE"))));
+        permissions.put("function", Value.set(Set.of(Value.string("EXECUTE"))));
+
+        Identity identity = new Identity(
+                BACKEND_ID,
+                role,
+                true,
+                "integration-test/" + role,
+                passwordVersion,
+                new SecretValue(password)
+        );
+        Access access = new Access(
+                role,
+                new Resource(BACKEND_ID, target),
+                Map.of("permissions", Value.object(permissions))
+        );
+        return new PactState(Set.of(access), Set.of(identity));
+    }
+
+    private static Set<Grant> expectedGrants(
+            String database,
+            String schema,
+            String role,
+            String tablePrivilege
+    ) {
+        return Set.of(
+                grant(new GrantTarget(database, null, null, null), role,
+                        Privilege.CONNECT),
+                grant(new GrantTarget(database, schema, null, null), role,
+                        Privilege.USAGE),
+                grant(new GrantTarget(database, schema, TABLE, null), role,
+                        Privilege.valueOf(tablePrivilege)),
+                grant(new GrantTarget(database, schema, TABLE, COLUMN), role,
+                        Privilege.UPDATE),
+                grant(new GrantTarget(
+                        database, schema, null, null, SEQUENCE
+                ), role, Privilege.USAGE),
+                grant(new GrantTarget(
+                        database,
+                        schema,
+                        null,
+                        null,
+                        null,
+                        new RoutineSignature(FUNCTION, "integer")
+                ), role, Privilege.EXECUTE)
+        );
+    }
+
+    private static Grant grant(
+            GrantTarget target,
+            String role,
+            Privilege privilege
+    ) {
+        return new Grant(target, role, privilege);
+    }
+
+    private static void assertCanLogin(
+            PostgreSqlConfig config,
+            String database,
+            String role,
+            String password
+    ) throws SQLException {
+        try (Connection connection = databaseConnection(
+                config,
+                database,
+                role,
+                password
+        ); Statement statement = connection.createStatement()) {
+            try (var rows = statement.executeQuery("SELECT current_user")) {
+                assertTrue(rows.next());
+                assertEquals(role, rows.getString(1));
+            }
+        }
+    }
+
+    private static Connection adminConnection(PostgreSqlConfig config)
+            throws SQLException {
+        return DriverManager.getConnection(
+                config.jdbcUrl(),
+                config.username(),
+                config.password()
+        );
+    }
+
+    private static Connection databaseConnection(
+            PostgreSqlConfig config,
+            String database,
+            String username,
+            String password
+    ) throws SQLException {
+        PGSimpleDataSource dataSource = new PGSimpleDataSource();
+        dataSource.setUrl(config.jdbcUrl());
+        dataSource.setDatabaseName(database);
+        return dataSource.getConnection(username, password);
+    }
+
+    private static void dropDatabaseAndRole(
+            PostgreSqlConfig config,
+            String database,
+            String role
+    ) throws SQLException {
+        try (Connection connection = adminConnection(config);
+             Statement statement = connection.createStatement()) {
+            statement.execute(
+                    "DROP DATABASE IF EXISTS " + quoteIdentifier(database)
+            );
+            statement.execute("DROP ROLE IF EXISTS " + quoteIdentifier(role));
+        }
+    }
+
+    private static String quoteIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String required(String name) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(
+                    "Missing required integration-test environment variable: "
+                            + name
+            );
+        }
+        return value;
+    }
+}

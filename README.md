@@ -62,7 +62,8 @@ through Java `ServiceLoader`, so a new backend can be added without adding
 backend-specific branches to the PACT core. Plugin JARs and their runtime
 dependencies are loaded from the configured plugins directory.
 
-The plugin authoring guide is a TODO. The extension points are currently
+The backend plugin authoring guide is
+[`BACKEND_DEVELOPMENT.md`](BACKEND_DEVELOPMENT.md). The extension points are
 `BackendFactory` / `Backend` and `StateProviderFactory` / `StateProvider` in
 `pact-api`.
 
@@ -89,9 +90,9 @@ provide them through the deployment's secret/configuration mechanism.
 | `pact-filesystem` | Reads a YAML snapshot as desired state |
 | `pact-kubernetes` | Watches `DataAccess` custom resources and reconciles their combined state |
 | `pact-ranger` | Compiles access into managed policies for a configured Apache Ranger service |
-| `pact-artifactkeeper` | Reconciles access with Artifact Keeper |
-| `pact-postgresql` | Reconciles PostgreSQL database-level privileges |
-| `pact-elasticsearch` | Elasticsearch native roles and user-role assignments (under development) |
+| `pact-artifactkeeper` | Reconciles Artifact Keeper repository permissions ([current scope and roadmap](pact-artifactkeeper/README.md)) |
+| `pact-postgresql` | Reconciles PostgreSQL object privileges and declared role identities |
+| `pact-elasticsearch` | Reconciles Elasticsearch 9 native users' index privileges through PACT-owned roles |
 
 Backend-specific configuration, supported access fields, permissions, and
 operational requirements belong in each module's README.
@@ -158,7 +159,8 @@ secret mechanism rather than baking them into the image.
 
 The Kubernetes state provider runs as a controller and watches `DataAccess`
 resources cluster-wide. It requires the corresponding CRD, status subresource,
-and RBAC; see [`pact-kubernetes/README.md`](pact-kubernetes/README.md).
+and RBAC; see [`pact-kubernetes/README.md`](pact-kubernetes/README.md) and the
+[PACT Helm chart](charts/pact).
 
 ## Build
 
@@ -171,3 +173,7 @@ mvn test
 
 Live integration tests and their isolation requirements are described in
 [`INTEGRATION_TESTS.md`](INTEGRATION_TESTS.md).
+
+The local Docker Compose backend and end-to-end test stack is documented there
+as well. Its E2E run exercises the filesystem provider and the Ranger,
+Artifact Keeper, and PostgreSQL backends against disposable services.

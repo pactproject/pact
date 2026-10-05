@@ -2,6 +2,7 @@ package io.github.pactproject.ranger.compile;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.pactproject.api.Access;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.Resource;
@@ -14,11 +15,59 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RangerPolicyCompilerTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void treatsEmptyTransformDefinitionsAsUnsupported() throws Exception {
+        RangerServiceDefinition definition = definition("""
+                {
+                  "name":"hdfs",
+                  "resources":[{"name":"path"}],
+                  "accessTypes":[{"name":"read"}],
+                  "dataMaskDef":{},
+                  "rowFilterDef":{}
+                }
+                """);
+
+        assertNull(definition.dataMask());
+        assertNull(definition.rowFilter());
+    }
+
+    @Test
+    void allowsConfiguredBackendIdToDifferFromRangerServiceType()
+            throws Exception {
+        RangerServiceDefinition definition = definition("""
+                {
+                  "name":"hdfs",
+                  "resources":[{"name":"path"}],
+                  "accessTypes":[{"name":"read"}]
+                }
+                """);
+        Access access = new Access(
+                "alice",
+                new Resource("ranger-backend", Map.of("path", "/data")),
+                Map.of(
+                        "permissions",
+                        Value.object(Map.of("path", strings("read")))
+                )
+        );
+
+        List<ObjectNode> policies = RangerPolicyCompiler.compile(
+                new PactState(Set.of(access)),
+                definition,
+                "ranger-backend",
+                "hdfs",
+                "pact-it-hdfs"
+        );
+
+        assertEquals(1, policies.size());
+        assertEquals("hdfs", policies.get(0).path("serviceType").asText());
+    }
 
     @Test
     void compilesAccessTypesAndResourceAncestorsFromServiceDefinition()
@@ -59,6 +108,7 @@ class RangerPolicyCompilerTest {
         List<? extends JsonNode> policies = RangerPolicyCompiler.compile(
                 new PactState(Set.of(access)),
                 definition,
+                "ozone",
                 "ozone",
                 "ozone-cluster"
         );
@@ -165,6 +215,7 @@ class RangerPolicyCompilerTest {
                 new PactState(Set.of(customMaskAndFilter, hashMask)),
                 definition,
                 "analytics",
+                "analytics",
                 "analytics-cluster"
         );
         assertEquals(2, policies.size());
@@ -203,6 +254,7 @@ class RangerPolicyCompilerTest {
                         new PactState(Set.of(invalid)),
                         definition,
                         "analytics",
+                        "analytics",
                         "analytics-cluster"
                 ));
     }
@@ -240,6 +292,7 @@ class RangerPolicyCompilerTest {
         List<? extends JsonNode> policies = RangerPolicyCompiler.compile(
                 new PactState(Set.of(alice, bob)),
                 definition,
+                "ozone",
                 "ozone",
                 "ozone-cluster"
         );

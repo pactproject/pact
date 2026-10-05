@@ -2,6 +2,7 @@ package io.github.pactproject.kubernetes.controller;
 
 import io.fabric8.kubernetes.api.model.GenericKubernetesResource;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
+import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.base.PatchContext;
 import io.fabric8.kubernetes.client.dsl.base.PatchType;
@@ -9,8 +10,10 @@ import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
 import io.github.pactproject.api.Access;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.ManagedStateProvider;
 import io.github.pactproject.api.PactState;
+import io.github.pactproject.api.SecretValue;
 import io.github.pactproject.api.StateReconciler;
 import io.github.pactproject.api.exception.StateProviderException;
 import io.github.pactproject.api.exception.StateReconciliationException;
@@ -20,6 +23,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -173,7 +181,11 @@ public final class DataAccessController
                     key,
                     new AppliedResource(
                             spec,
-                            compiler.compile(List.of(spec))
+                            restoreIdentityVersions(
+                                    compiler.compile(List.of(spec)),
+                                    status.get("lastAppliedIdentityVersions"),
+                                    key.namespace()
+                            )
                     )
             );
         }
@@ -184,16 +196,21 @@ public final class DataAccessController
     private PactState compileResources(
             List<GenericKubernetesResource> resources)
     {
-        List<Map<String, ?>> specs = new ArrayList<>(resources.size());
+        Map<ResourceKey, AppliedResource> compiledResources =
+                new HashMap<>();
         for (GenericKubernetesResource resource : resources) {
-            specs.add(
-                    requiredObject(
-                            resource.getAdditionalProperties().get("spec"),
-                            "spec"
-                    )
+            Map<String, ?> spec = requiredObject(
+                    resource.getAdditionalProperties().get("spec"),
+                    "spec"
             );
+            ResourceKey key = resourceKey(resource);
+            PactState compiled = resolveCredentials(
+                    compiler.compile(List.of(spec)),
+                    key.namespace()
+            );
+            compiledResources.put(key, new AppliedResource(spec, compiled));
         }
-        return compiler.compile(specs);
+        return aggregate(compiledResources);
     }
 
     private void awaitInformerSync()
@@ -367,7 +384,10 @@ public final class DataAccessController
                     event.resource().getAdditionalProperties().get("spec"),
                     "spec"
             );
-            resourceState = compiler.compile(List.of(spec));
+            resourceState = resolveCredentials(
+                    compiler.compile(List.of(spec)),
+                    event.key().namespace()
+            );
         }
         catch (RuntimeException e) {
             log.warn(
@@ -383,11 +403,6 @@ public final class DataAccessController
             return;
         }
 
-        patchStatus(
-                event.key(),
-                status("Applying", null, generation, null, false)
-        );
-
         Map<ResourceKey, AppliedResource> next =
                 new HashMap<>(appliedResources);
         next.put(
@@ -395,12 +410,30 @@ public final class DataAccessController
                 new AppliedResource(spec, resourceState)
         );
         try {
-            reconciler.apply(aggregate(next));
-            appliedResources.clear();
-            appliedResources.putAll(next);
+            PactState desired = aggregate(next);
             patchStatus(
                     event.key(),
-                    status("Ready", null, generation, spec, true)
+                    status("Applying", null, generation, null, false)
+            );
+            reconciler.apply(desired);
+            appliedResources.clear();
+            appliedResources.putAll(withoutSecrets(next));
+            patchStatus(
+                    event.key(),
+                    status(
+                            "Ready",
+                            null,
+                            generation,
+                            spec,
+                            true,
+                            secretVersions(resourceState)
+                    )
+            );
+        }
+        catch (IllegalArgumentException e) {
+            patchStatus(
+                    event.key(),
+                    status("Error", e.getMessage(), generation, null, false)
             );
         }
         catch (StateReconciliationException e) {
@@ -473,10 +506,235 @@ public final class DataAccessController
             Map<ResourceKey, AppliedResource> resources)
     {
         Set<Access> accesses = new HashSet<>();
-        resources.values().forEach(
-                applied -> accesses.addAll(applied.state().accesses())
+        Set<Identity> identities = new HashSet<>();
+        Map<String, ResourceKey> identityOwners = new HashMap<>();
+        resources.forEach((key, applied) -> {
+            accesses.addAll(applied.state().accesses());
+            for (Identity identity : applied.state().identities()) {
+                String identityKey = identity.backendId()
+                        + "\u0000" + identity.principal();
+                ResourceKey previousOwner = identityOwners.putIfAbsent(
+                        identityKey,
+                        key
+                );
+                if (previousOwner != null && !previousOwner.equals(key)) {
+                    throw new IllegalArgumentException(
+                            "Identity '" + identity.principal()
+                                    + "' for backend '" + identity.backendId()
+                                    + "' must be declared by only one DataAccess"
+                    );
+                }
+                identities.add(identity);
+            }
+        });
+        return new PactState(accesses, identities);
+    }
+
+    private PactState resolveCredentials(PactState state, String namespace)
+    {
+        Set<Identity> identities = new HashSet<>();
+        for (Identity identity : state.identities()) {
+            if (identity.passwordSource() == null) {
+                identities.add(identity);
+                continue;
+            }
+            int separator = identity.passwordSource().indexOf('/');
+            if (separator < 1 || separator == identity.passwordSource().length() - 1) {
+                throw new IllegalArgumentException(
+                        "Invalid password Secret reference for identity '"
+                                + identity.principal() + "'"
+                );
+            }
+            String secretName =
+                    identity.passwordSource().substring(0, separator);
+            String secretKey =
+                    identity.passwordSource().substring(separator + 1);
+            Secret secret = client.secrets()
+                    .inNamespace(namespace)
+                    .withName(secretName)
+                    .get();
+            if (secret == null) {
+                throw new IllegalArgumentException(
+                        "Password Secret '" + secretName
+                                + "' does not exist in namespace '"
+                                + namespace + "'"
+                );
+            }
+            String encoded = secret.getData() == null
+                    ? null
+                    : secret.getData().get(secretKey);
+            if (encoded == null) {
+                throw new IllegalArgumentException(
+                        "Password Secret '" + secretName
+                                + "' has no key '" + secretKey + "'"
+                );
+            }
+            String version = secret.getMetadata() == null
+                    ? null
+                    : secret.getMetadata().getResourceVersion();
+            if (isBlank(version)) {
+                throw new IllegalArgumentException(
+                        "Password Secret '" + secretName
+                                + "' has no resourceVersion"
+                );
+            }
+            identities.add(identity.withPassword(
+                    qualifiedSecretSource(namespace, identity.passwordSource()),
+                    version,
+                    new SecretValue(decodeSecret(encoded, secretName, secretKey))
+            ));
+        }
+        return new PactState(state.accesses(), identities);
+    }
+
+    private String decodeSecret(
+            String encoded,
+            String secretName,
+            String secretKey)
+    {
+        byte[] bytes;
+        try {
+            bytes = Base64.getDecoder().decode(encoded);
+        }
+        catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                    "Password Secret '" + secretName
+                            + "' key '" + secretKey + "' is not valid base64"
+            );
+        }
+        try {
+            String value = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            if (value.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "Password Secret '" + secretName
+                                + "' key '" + secretKey + "' must not be empty"
+                );
+            }
+            return value;
+        }
+        catch (CharacterCodingException e) {
+            throw new IllegalArgumentException(
+                    "Password Secret '" + secretName
+                            + "' key '" + secretKey
+                            + "' must contain UTF-8 text"
+            );
+        }
+        finally {
+            java.util.Arrays.fill(bytes, (byte) 0);
+        }
+    }
+
+    private PactState restoreIdentityVersions(
+            PactState state,
+            Object versionValue,
+            String namespace)
+    {
+        if (versionValue == null) {
+            return state;
+        }
+        if (!(versionValue instanceof Iterable<?> entries)) {
+            throw new IllegalArgumentException(
+                    "DataAccess status.lastAppliedIdentityVersions must be an array"
+            );
+        }
+        Map<IdentityVersionKey, String> versions = new HashMap<>();
+        for (Object entryValue : entries) {
+            if (!(entryValue instanceof Map<?, ?> entry)) {
+                throw new IllegalArgumentException(
+                        "DataAccess status identity version entry must be an object"
+                );
+            }
+            String backend = statusString(entry, "backend");
+            String principal = statusString(entry, "principal");
+            String source = statusString(entry, "source");
+            String version = statusString(entry, "resourceVersion");
+            versions.put(
+                    new IdentityVersionKey(backend, principal, source),
+                    version
+            );
+        }
+        Set<Identity> identities = new HashSet<>();
+        for (Identity identity : state.identities()) {
+            String version = versions.get(new IdentityVersionKey(
+                    identity.backendId(),
+                    identity.principal(),
+                    qualifiedSecretSource(
+                            namespace,
+                            identity.passwordSource()
+                    )
+            ));
+            identities.add(
+                    identity.passwordSource() != null && version != null
+                            ? identity.withPasswordVersion(
+                                    qualifiedSecretSource(
+                                            namespace,
+                                            identity.passwordSource()
+                                    ),
+                                    version
+                            )
+                            : identity
+            );
+        }
+        return new PactState(state.accesses(), identities);
+    }
+
+    private String qualifiedSecretSource(String namespace, String source)
+    {
+        return source == null ? null : namespace + "/" + source;
+    }
+
+    private String statusString(Map<?, ?> values, String field)
+    {
+        Object value = values.get(field);
+        if (!(value instanceof String string) || string.isBlank()) {
+            throw new IllegalArgumentException(
+                    "DataAccess status identity version field '"
+                            + field + "' must be a non-empty string"
+            );
+        }
+        return string;
+    }
+
+    private List<Map<String, String>> secretVersions(PactState state)
+    {
+        List<Identity> identities = state.identities().stream()
+                .filter(identity ->
+                        identity.passwordSource() != null
+                                && identity.passwordVersion() != null)
+                .sorted(java.util.Comparator
+                        .comparing(Identity::backendId)
+                        .thenComparing(Identity::principal))
+                .toList();
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Identity identity : identities) {
+            result.add(Map.of(
+                    "backend", identity.backendId(),
+                    "principal", identity.principal(),
+                    "source", identity.passwordSource(),
+                    "resourceVersion", identity.passwordVersion()
+            ));
+        }
+        return List.copyOf(result);
+    }
+
+    private Map<ResourceKey, AppliedResource> withoutSecrets(
+            Map<ResourceKey, AppliedResource> resources)
+    {
+        Map<ResourceKey, AppliedResource> result = new HashMap<>();
+        resources.forEach((key, resource) ->
+                result.put(
+                        key,
+                        new AppliedResource(
+                                resource.spec(),
+                                resource.state().withoutSecrets()
+                        )
+                )
         );
-        return new PactState(accesses);
+        return result;
     }
 
     private Map<String, Object> status(
@@ -486,12 +744,34 @@ public final class DataAccessController
             Map<String, ?> spec,
             boolean updateLastAppliedSpec)
     {
+        return status(
+                phase,
+                error,
+                generation,
+                spec,
+                updateLastAppliedSpec,
+                null
+        );
+    }
+
+    private Map<String, Object> status(
+            String phase,
+            String error,
+            long generation,
+            Map<String, ?> spec,
+            boolean updateLastAppliedSpec,
+            List<Map<String, String>> identityVersions)
+    {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("phase", phase);
         result.put("lastError", error);
         result.put("observedGeneration", generation);
         if (updateLastAppliedSpec) {
             result.put("lastAppliedSpec", spec);
+            result.put(
+                    "lastAppliedIdentityVersions",
+                    identityVersions == null ? List.of() : identityVersions
+            );
         }
         return result;
     }
@@ -818,6 +1098,13 @@ public final class DataAccessController
     private record AppliedResource(
             Map<String, ?> spec,
             PactState state)
+    {
+    }
+
+    private record IdentityVersionKey(
+            String backend,
+            String principal,
+            String source)
     {
     }
 }

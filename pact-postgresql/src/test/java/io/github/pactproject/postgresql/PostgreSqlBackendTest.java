@@ -2,6 +2,7 @@ package io.github.pactproject.postgresql;
 
 import io.github.pactproject.api.Access;
 import io.github.pactproject.api.BackendTransaction;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.Resource;
 import io.github.pactproject.api.exception.BackendOperationException;
@@ -94,6 +95,53 @@ class PostgreSqlBackendTest {
         );
     }
 
+    @Test
+    void reconcilesIdentityOnlyStateBeforeAnyGrantWork() throws Exception {
+        FakeClient client = new FakeClient();
+        PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
+        Identity identity = new Identity(
+                "postgres",
+                "alice",
+                true,
+                null,
+                null,
+                null
+        );
+
+        backend.prepare(
+                PactState.empty(),
+                new PactState(Set.of(), Set.of(identity))
+        ).apply();
+
+        assertEquals(Set.of(identity), client.desiredIdentities);
+        assertEquals(Set.of(), client.actual);
+    }
+
+    @Test
+    void doesNotCompensateIdentityChangesWhenGrantTransactionRollsBack()
+            throws Exception {
+        FakeClient client = new FakeClient();
+        PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
+        Identity identity = new Identity(
+                "postgres",
+                "alice",
+                true,
+                null,
+                null,
+                null
+        );
+        BackendTransaction transaction = backend.prepare(
+                PactState.empty(),
+                new PactState(Set.of(), Set.of(identity))
+        );
+
+        transaction.apply();
+        transaction.rollback();
+
+        assertEquals(1, client.identityReconciliationCount);
+        assertEquals(Set.of(identity), client.desiredIdentities);
+    }
+
     private static PactState state(
             String role,
             String database,
@@ -124,7 +172,9 @@ class PostgreSqlBackendTest {
 
     private static final class FakeClient implements PostgreSqlClient {
         private final Set<Grant> actual = new HashSet<>();
+        private Set<Identity> desiredIdentities = Set.of();
         private boolean failOnRead;
+        private int identityReconciliationCount;
 
         @Override
         public Set<Grant> getManagedGrants(Set<String> databases)
@@ -135,6 +185,15 @@ class PostgreSqlBackendTest {
             return actual.stream()
                     .filter(grant -> databases.contains(grant.target().database()))
                     .collect(Collectors.toUnmodifiableSet());
+        }
+
+        @Override
+        public void reconcileIdentities(
+                Set<Identity> previous,
+                Set<Identity> desired
+        ) {
+            identityReconciliationCount++;
+            desiredIdentities = Set.copyOf(desired);
         }
 
         @Override

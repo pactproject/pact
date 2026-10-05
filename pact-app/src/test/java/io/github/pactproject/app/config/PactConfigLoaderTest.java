@@ -141,4 +141,70 @@ class PactConfigLoaderTest
                 () -> new PactConfigLoader().load(file)
         );
     }
+
+    @Test
+    void substitutesEnvironmentVariablesAfterYamlParsing()
+            throws Exception
+    {
+        Path file = tempDir.resolve("pact-env.yaml");
+        Files.writeString(
+                file,
+                """
+                stateProvider:
+                  type: kubernetes
+                  config: {}
+                backends:
+                  - id: database
+                    type: postgresql
+                    config:
+                      password: "${DB_PASSWORD}"
+                      jdbc-url: "jdbc:postgresql://${DB_HOST}:5432/postgres"
+                """
+        );
+
+        PactConfig config = new PactConfigLoader(name -> switch (name) {
+            case "DB_PASSWORD" -> "p:a\\\"ss";
+            case "DB_HOST" -> "db.internal";
+            default -> null;
+        }).load(file);
+
+        assertEquals(
+                "p:a\\\"ss",
+                config.backends().getFirst().config().get("password")
+        );
+        assertEquals(
+                "jdbc:postgresql://db.internal:5432/postgres",
+                config.backends().getFirst().config().get("jdbc-url")
+        );
+    }
+
+    @Test
+    void rejectsUnsetEnvironmentVariables()
+            throws Exception
+    {
+        Path file = tempDir.resolve("pact-unset-env.yaml");
+        Files.writeString(
+                file,
+                """
+                stateProvider:
+                  type: kubernetes
+                  config: {}
+                backends:
+                  - id: database
+                    type: postgresql
+                    config:
+                      password: "${MISSING_PASSWORD}"
+                """
+        );
+
+        PactConfigException exception = assertThrows(
+                PactConfigException.class,
+                () -> new PactConfigLoader(name -> null).load(file)
+        );
+        assertEquals(
+                true,
+                exception.getCause().getMessage()
+                        .contains("MISSING_PASSWORD")
+        );
+    }
 }

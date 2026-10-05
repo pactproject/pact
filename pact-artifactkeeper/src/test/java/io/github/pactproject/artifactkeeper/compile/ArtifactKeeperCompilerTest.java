@@ -47,6 +47,24 @@ class ArtifactKeeperCompilerTest {
     }
 
     @Test
+    void compilesServiceAccountPrincipals() {
+        List<ArtifactKeeperPermission> result =
+                ArtifactKeeperCompiler.compile(new PactState(Set.of(
+                        access("svc-build", Set.of("read"))
+                )));
+
+        assertEquals(
+                List.of(new ArtifactKeeperPermission(
+                        "repository-a",
+                        "service_account",
+                        "svc-build",
+                        Set.of("read")
+                )),
+                result
+        );
+    }
+
+    @Test
     void mergesRepeatedAccessEntriesForSameUserAndRepository() {
         PactState state = new PactState(Set.of(
                 access("alice", Set.of("read")),
@@ -189,6 +207,7 @@ class ArtifactKeeperCompilerTest {
     ) {
         return new ArtifactKeeperPermission(
                 "repository-a",
+                username.startsWith("svc-") ? "service_account" : "user",
                 username,
                 Set.of(actions)
         );

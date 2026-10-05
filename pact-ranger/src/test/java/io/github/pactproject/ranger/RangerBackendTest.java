@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RangerBackendTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -60,6 +61,45 @@ class RangerBackendTest {
 
         transaction.rollback();
         assertEquals(0, client.policies.size());
+    }
+
+    @Test
+    void backendUsesManagedOnlyScopeWhenConfigured() throws Exception {
+        FakeClient client = new FakeClient();
+        client.policies.add(MAPPER.readTree("""
+                {"id":1,"name":"hand-written","policyLabels":["manual"]}
+                """));
+        RangerBackend backend = new RangerBackend(
+                "ozone",
+                new RangerConfig(
+                        URI.create("http://localhost:6080/service"),
+                        "sync",
+                        "secret",
+                        "ozone-cluster",
+                        100,
+                        true
+                ),
+                client
+        );
+        PactState desired = new PactState(Set.of(
+                new Access(
+                        "alice",
+                        new Resource("ozone", Map.of("volume", "warehouse")),
+                        Map.of(
+                                "permissions",
+                                Value.object(Map.of(
+                                        "volume",
+                                        Value.set(Set.of(Value.string("read")))
+                                ))
+                        )
+                )
+        ));
+
+        backend.prepare(PactState.empty(), desired).apply();
+
+        assertEquals(2, client.policies.size());
+        assertTrue(client.policies.stream().anyMatch(policy ->
+                policy.path("name").asText().equals("hand-written")));
     }
 
     private static final class FakeClient implements RangerClient {

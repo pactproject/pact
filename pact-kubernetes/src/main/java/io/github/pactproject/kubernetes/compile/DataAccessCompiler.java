@@ -1,6 +1,7 @@
 package io.github.pactproject.kubernetes.compile;
 
 import io.github.pactproject.api.Access;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.Resource;
 import io.github.pactproject.api.value.Value;
@@ -32,14 +33,109 @@ public final class DataAccessCompiler
             Iterable<? extends Map<String, ?>> dataAccessSpecs)
     {
         Set<Access> accesses = new HashSet<>();
+        Set<Identity> identities = new HashSet<>();
 
         for (Map<String, ?> spec : dataAccessSpecs) {
             accesses.addAll(
                     compileDataAccess(spec)
             );
+            identities.addAll(compileIdentities(spec.get("identities")));
         }
 
-        return new PactState(accesses);
+        try {
+            return new PactState(accesses, identities);
+        }
+        catch (IllegalArgumentException e) {
+            throw invalid(e.getMessage());
+        }
+    }
+
+    private Set<Identity> compileIdentities(Object value)
+    {
+        if (value == null) {
+            return Set.of();
+        }
+        if (!(value instanceof Iterable<?> declarations)) {
+            throw invalid("DataAccess spec.identities must be an array");
+        }
+
+        Map<String, Identity> result = new HashMap<>();
+        for (Object declarationValue : declarations) {
+            if (!(declarationValue instanceof Map<?, ?> declaration)) {
+                throw invalid("DataAccess identity declaration must be an object");
+            }
+            for (Object key : declaration.keySet()) {
+                if (!(key instanceof String field)
+                        || !Set.of(
+                                "backend",
+                                "name",
+                                "ensure",
+                                "passwordSecretRef"
+                        ).contains(field)) {
+                    throw invalid(
+                            "Unsupported DataAccess identity field: " + key
+                    );
+                }
+            }
+
+            String backendId = requiredString(declaration, "backend");
+            String principal = requiredString(declaration, "name");
+            Object ensureValue = declaration.get("ensure");
+            if (ensureValue != null && !(ensureValue instanceof Boolean)) {
+                throw invalid(
+                        "DataAccess identity.ensure must be a boolean"
+                );
+            }
+            boolean ensure = Boolean.TRUE.equals(ensureValue);
+            String source = passwordSource(
+                    declaration.get("passwordSecretRef")
+            );
+            Identity identity = new Identity(
+                    backendId,
+                    principal,
+                    ensure,
+                    source,
+                    null,
+                    null
+            );
+            String key = backendId + "\u0000" + principal;
+            Identity previous = result.putIfAbsent(key, identity);
+            if (previous != null && !previous.equals(identity)) {
+                throw invalid(
+                        "Conflicting identity declarations for backend '"
+                                + backendId + "' and principal '"
+                                + principal + "'"
+                );
+            }
+        }
+        return Set.copyOf(result.values());
+    }
+
+    private String passwordSource(Object value)
+    {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Map<?, ?> reference)
+                || !reference.keySet().equals(Set.of("name", "key"))) {
+            throw invalid(
+                    "DataAccess identity.passwordSecretRef must contain only name and key"
+            );
+        }
+        String name = requiredString(reference, "name");
+        String key = requiredString(reference, "key");
+        return name + "/" + key;
+    }
+
+    private String requiredString(Map<?, ?> values, String field)
+    {
+        Object value = values.get(field);
+        if (!(value instanceof String string) || string.isBlank()) {
+            throw invalid(
+                    "DataAccess identity." + field + " must be a non-empty string"
+            );
+        }
+        return string;
     }
 
     private Set<Access> compileDataAccess(

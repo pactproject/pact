@@ -36,11 +36,39 @@ class ArtifactKeeperResolverTest {
                         new ActualArtifactKeeperPermission(
                                 "permission-1",
                                 "repository-a",
+                                "user",
                                 "alice",
                                 Set.of("read", "write")
                         )
                 ),
                 result
+        );
+    }
+
+    @Test
+    void resolvesServiceAccountPermission() {
+        var state = new ArtifactKeeperState(
+                List.of(new ArtifactKeeperApiUser("user-1", "svc-build")),
+                List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),
+                List.of(new ArtifactKeeperApiPermission(
+                        "permission-1",
+                        "service_account",
+                        "user-1",
+                        "repository",
+                        "repo-1",
+                        Set.of("read")
+                ))
+        );
+
+        assertEquals(
+                List.of(new ActualArtifactKeeperPermission(
+                        "permission-1",
+                        "repository-a",
+                        "service_account",
+                        "svc-build",
+                        Set.of("read")
+                )),
+                ArtifactKeeperResolver.resolve(state)
         );
     }
 
@@ -51,7 +79,7 @@ class ArtifactKeeperResolverTest {
                 List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),
                 List.of(new ArtifactKeeperApiPermission(
                         "permission-1",
-                        "service_account",
+                        "group",
                         "user-1",
                         "repository",
                         "repo-1",
@@ -65,7 +93,7 @@ class ArtifactKeeperResolverTest {
         );
 
         assertEquals(
-                "Unsupported Artifact Keeper principal type: service_account",
+                "Unsupported Artifact Keeper principal type: group",
                 exception.getMessage()
         );
     }

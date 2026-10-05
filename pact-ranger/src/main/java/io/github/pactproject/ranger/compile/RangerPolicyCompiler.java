@@ -63,6 +63,7 @@ public final class RangerPolicyCompiler {
     public static List<ObjectNode> compile(
             PactState state,
             RangerServiceDefinition serviceDefinition,
+            String backendId,
             String serviceType,
             String serviceName
     ) {
@@ -72,6 +73,7 @@ public final class RangerPolicyCompiler {
                     access,
                     state,
                     serviceDefinition,
+                    backendId,
                     serviceType,
                     serviceName,
                     policies
@@ -87,15 +89,16 @@ public final class RangerPolicyCompiler {
             Access access,
             PactState state,
             RangerServiceDefinition definition,
+            String backendId,
             String serviceType,
             String serviceName,
             Map<String, PolicyBuilder> policies
     ) {
-        if (!serviceType.equals(access.resource().backendId())) {
+        if (!backendId.equals(access.resource().backendId())) {
             throw new IllegalArgumentException(
                     "Access backend '" + access.resource().backendId()
-                            + "' does not match Ranger service-type '"
-                            + serviceType + "'"
+                            + "' does not match configured Ranger backend '"
+                            + backendId + "'"
             );
         }
         validateTarget(access.resource().target(), definition);

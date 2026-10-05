@@ -1,0 +1,30 @@
+{{- $providerConfig := deepCopy (.Values.pact.stateProvider.config | default dict) -}}
+{{- $_ := set $providerConfig "group" .Values.dataAccess.group -}}
+{{- $_ := set $providerConfig "version" .Values.dataAccess.version -}}
+{{- $_ := set $providerConfig "plural" .Values.dataAccess.plural -}}
+{{- if not .Values.dataAccess.group }}
+{{- fail "dataAccess.group is required" }}
+{{- end }}
+{{- if not .Values.dataAccess.version }}
+{{- fail "dataAccess.version is required" }}
+{{- end }}
+{{- if not .Values.dataAccess.plural }}
+{{- fail "dataAccess.plural is required" }}
+{{- end }}
+{{- if not .Values.dataAccess.singular }}
+{{- fail "dataAccess.singular is required" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pact.fullname" . }}-config
+  labels:
+    {{- include "pact.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    stateProvider:
+      type: kubernetes
+      config:
+        {{- toYaml $providerConfig | nindent 8 }}
+    backends:
+      {{- toYaml .Values.pact.backends | nindent 6 }}

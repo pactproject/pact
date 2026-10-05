@@ -35,6 +35,33 @@ is the service name used by `DataAccess.spec.resources`. Registry locations
 with `name` are translated to Artifact Keeper repository targets, and
 `permissions` are translated to backend `actions`.
 
+### PostgreSQL identities
+
+`DataAccess.spec.identities` can declare PostgreSQL roles separately from
+grants. A referenced password is read from a Kubernetes Secret in the same
+namespace as the `DataAccess`:
+
+```yaml
+identities:
+  - backend: analytics-db
+    name: app
+    ensure: true
+    passwordSecretRef:
+      name: app-credentials
+      key: password
+resources: []
+```
+
+`ensure` defaults to `false`: the PostgreSQL role must already exist unless
+creation is explicitly enabled. `passwordSecretRef` is optional. Existing
+roles must have `LOGIN` when PACT is asked to set a password; PACT does not
+change existing role attributes. PACT does not delete roles when an identity
+declaration is removed. Each backend/principal identity must be declared by
+only one `DataAccess` resource. Secret changes alone do not trigger
+reconciliation; a later generation change to the declaring `DataAccess` loads
+and applies the current Secret value. Passwords are not written to
+`DataAccess` status or applied-state snapshots.
+
 ### Target lists
 
 A target field can be a scalar or a non-empty list of scalar values. When
@@ -90,12 +117,51 @@ rules:
 ```
 
 Replace the API group above when configuring a different group. The controller
-does not create or modify the CRD.
+does not create or modify the CRD. Secret reads are only needed when identities
+use `passwordSecretRef`. The controller reads each referenced Secret with a
+named `get`; it does not need `list` or `watch` permission on Secrets. Grant
+access with a Role and RoleBinding alongside the SealedSecret, restricted by
+`resourceNames` to that Secret. The binding subject is the controller's
+ServiceAccount, even when it lives in a different namespace:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pact-read-app-credentials
+  namespace: payments
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["app-credentials"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pact-read-app-credentials
+  namespace: payments
+subjects:
+  - kind: ServiceAccount
+    name: pact
+    namespace: pact-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pact-read-app-credentials
+```
+
+The `Role` and `RoleBinding` can be managed by ArgoCD in the same GitOps
+application as the SealedSecret. The Role restricts access to the Secret
+object, not to an individual data key; use one Secret per credential when
+separate key-level access boundaries are required. Do not add cluster-wide
+`get secrets` permission to the controller role.
 
 ## Current scope
 
 Registry resources for Artifact Keeper are wired end to end. Ozone and Trino
-resources require a Ranger backend, which is not yet included; their use will
-fail reconciliation if no matching backend is installed. The CRD schema,
-Ranger policy compilation, and deployment manifests are separate follow-up
-work.
+resources require a configured Ranger backend with a matching backend id.
+The in-repository Helm chart is in [`charts/pact`](../charts/pact); it can
+install a generic `DataAccess` CRD and the controller's RBAC. Service-specific
+CRD schema validation and external backend deployments remain operator
+responsibilities.

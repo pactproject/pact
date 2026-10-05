@@ -199,6 +199,9 @@ public final class RangerServiceDefinition {
         if (node == null || node.isNull()) {
             return null;
         }
+        if (node.isObject() && node.isEmpty()) {
+            return null;
+        }
         JsonNode resourceNodes = node.path("resources");
         JsonNode accessNodes = node.path("accessTypes");
         if (!resourceNodes.isArray()

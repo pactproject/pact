@@ -3,6 +3,7 @@ package io.github.pactproject.postgresql.client;
 import io.github.pactproject.postgresql.PostgreSqlConfig;
 import io.github.pactproject.postgresql.api.PostgreSqlClient;
 import io.github.pactproject.postgresql.api.PostgreSqlClientException;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.postgresql.model.Grant;
 import io.github.pactproject.postgresql.model.GrantLevel;
 import io.github.pactproject.postgresql.model.GrantTarget;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -169,6 +171,59 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     }
 
     @Override
+    public void reconcileIdentities(
+            Set<Identity> previous,
+            Set<Identity> desired
+    ) throws PostgreSqlClientException {
+        if (desired.isEmpty()) {
+            return;
+        }
+        for (Identity identity : desired) {
+            if (identity.passwordSource() != null
+                    && identity.password() == null) {
+                throw new PostgreSqlClientException(
+                        "Password Secret was not resolved for PostgreSQL role '"
+                                + identity.principal() + "'"
+                );
+            }
+        }
+
+        Map<String, Identity> previousByPrincipal = new java.util.HashMap<>();
+        for (Identity identity : previous) {
+            previousByPrincipal.put(identity.principal(), identity);
+        }
+
+        try (Connection connection = connectConfiguredDatabase()) {
+            connection.setAutoCommit(false);
+            try {
+                List<Identity> ordered = desired.stream()
+                        .sorted(java.util.Comparator.comparing(
+                                Identity::principal
+                        ))
+                        .toList();
+                for (Identity identity : ordered) {
+                    reconcileIdentity(
+                            connection,
+                            previousByPrincipal.get(identity.principal()),
+                            identity
+                    );
+                }
+                connection.commit();
+            }
+            catch (SQLException | RuntimeException e) {
+                rollback(connection, e);
+                throw e;
+            }
+        }
+        catch (SQLException e) {
+            throw new PostgreSqlClientException(
+                    "Failed to reconcile PostgreSQL identities",
+                    e
+            );
+        }
+    }
+
+    @Override
     public void synchronize(Set<String> databases, Set<Grant> desired)
             throws PostgreSqlClientException {
         for (Grant grant : desired) {
@@ -251,6 +306,128 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                 config.username(),
                 config.password()
         );
+    }
+
+    private Connection connectConfiguredDatabase() throws SQLException {
+        return DriverManager.getConnection(
+                config.jdbcUrl(),
+                config.username(),
+                config.password()
+        );
+    }
+
+    private void reconcileIdentity(
+            Connection connection,
+            Identity previous,
+            Identity desired
+    ) throws SQLException {
+        Boolean canLogin = roleCanLogin(connection, desired.principal());
+        if (canLogin == null) {
+            if (!desired.ensure()) {
+                throw new SQLException(
+                        "PostgreSQL role '" + desired.principal()
+                                + "' does not exist; set ensure: true to create it"
+                );
+            }
+            String sql = "CREATE ROLE " + quoteIdentifier(desired.principal())
+                    + " LOGIN"
+                    + (desired.password() == null
+                    ? ""
+                    : " PASSWORD " + quotePassword(desired.password().reveal()));
+            executeIdentityDdl(
+                    connection,
+                    sql,
+                    desired.principal(),
+                    "create"
+            );
+            return;
+        }
+
+        if (desired.password() != null
+                && !canLogin) {
+            throw new SQLException(
+                    "PostgreSQL role '" + desired.principal()
+                            + "' does not have LOGIN; PACT does not alter existing role attributes"
+            );
+        }
+        if (desired.password() != null
+                && passwordChanged(previous, desired)) {
+            String sql = "ALTER ROLE " + quoteIdentifier(desired.principal())
+                    + " PASSWORD " + quotePassword(desired.password().reveal());
+            executeIdentityDdl(
+                    connection,
+                    sql,
+                    desired.principal(),
+                    "set password for"
+            );
+        }
+    }
+
+    private Boolean roleCanLogin(Connection connection, String role)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = ?"
+        )) {
+            statement.setString(1, role);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? rows.getBoolean(1) : null;
+            }
+        }
+    }
+
+    private static boolean passwordChanged(
+            Identity previous,
+            Identity desired
+    ) {
+        return previous == null
+                || !java.util.Objects.equals(
+                        previous.passwordSource(),
+                        desired.passwordSource()
+                )
+                || !java.util.Objects.equals(
+                        previous.passwordVersion(),
+                        desired.passwordVersion()
+                );
+    }
+
+    private static void executeIdentityDdl(
+            Connection connection,
+            String sql,
+            String role,
+            String operation
+    ) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+        catch (SQLException e) {
+            throw new SQLException(
+                    "Failed to " + operation + " PostgreSQL role '"
+                            + role + "' (SQLState " + e.getSQLState() + ")",
+                    e.getSQLState()
+            );
+        }
+    }
+
+    static String quotePassword(String password) throws SQLException {
+        if (password.indexOf('\0') >= 0) {
+            throw new SQLException(
+                    "PostgreSQL passwords cannot contain a zero byte"
+            );
+        }
+        StringBuilder literal = new StringBuilder("E'");
+        for (int i = 0; i < password.length(); i++) {
+            char current = password.charAt(i);
+            if (current == '\\') {
+                literal.append("\\\\");
+            }
+            else if (current == '\'') {
+                literal.append("''");
+            }
+            else {
+                literal.append(current);
+            }
+        }
+        return literal.append('\'').toString();
     }
 
     private Set<Grant> loadManagedGrants(Connection connection, String database)
@@ -518,7 +695,8 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                 SELECT p.proname,
                        pg_catalog.pg_get_function_identity_arguments(p.oid)
                 FROM pg_catalog.pg_proc AS p
-                WHERE p.oid = ? AND """ + kindPredicate)) {
+                WHERE p.oid = ? AND %s
+                """.formatted(kindPredicate))) {
             statement.setLong(1, oid);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {

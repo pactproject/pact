@@ -5,6 +5,7 @@ import java.util.Set;
 public record ActualArtifactKeeperPermission(
         String id,
         String repository,
+        String principalType,
         String username,
         Set<String> actions
 ) {

@@ -23,7 +23,8 @@ public final class ArtifactKeeperResolver {
             ArtifactKeeperState state,
             ArtifactKeeperApiPermission permission
     ) {
-        if (!"user".equals(permission.principalType())) {
+        if (!"user".equals(permission.principalType())
+                && !"service_account".equals(permission.principalType())) {
             throw new IllegalArgumentException(
                     "Unsupported Artifact Keeper principal type: "
                             + permission.principalType()
@@ -43,6 +44,7 @@ public final class ArtifactKeeperResolver {
         return new ActualArtifactKeeperPermission(
                 permission.id(),
                 repository.name(),
+                permission.principalType(),
                 user.username(),
                 permission.actions()
         );

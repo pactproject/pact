@@ -1,0 +1,235 @@
+services:
+  ranger-db:
+    image: apache/ranger-db:2.9.0
+    environment:
+      POSTGRES_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
+      RANGER_DB_USER: ${RANGER_DB_USER:-rangeradmin}
+      RANGER_DB_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
+    healthcheck:
+      test: ["CMD-SHELL", "su -c 'pg_isready -q -h 127.0.0.1' postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  ranger-admin:
+    image: apache/ranger:2.9.0
+    depends_on:
+      ranger-db:
+        condition: service_healthy
+    environment:
+      POSTGRES_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
+      RANGER_DB_USER: ${RANGER_DB_USER:-rangeradmin}
+      RANGER_DB_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
+    ports:
+      - "${RANGER_PORT:-6080}:6080"
+
+  ranger-bootstrap:
+    image: pact-integration-tests:local
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.integration
+    depends_on:
+      - ranger-admin
+    entrypoint: ["/bin/sh", "/workspace/integration/scripts/bootstrap-ranger.sh"]
+    environment:
+      RANGER_URL: http://ranger-admin:6080/service
+      RANGER_USERNAME: ${RANGER_USERNAME:-admin}
+      RANGER_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
+      RANGER_SERVICE_NAME: ${PACT_IT_RANGER_SERVICE_NAME:-pact-it-hdfs}
+    restart: "no"
+
+  artifactkeeper-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: artifact_registry
+      POSTGRES_USER: registry
+      POSTGRES_PASSWORD: ${ARTIFACT_KEEPER_DB_PASSWORD:-pact-local-artifact-db}
+    volumes:
+      - artifactkeeper_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U registry -d artifact_registry"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  artifactkeeper-opensearch:
+    image: opensearchproject/opensearch:2.19.6
+    environment:
+      discovery.type: single-node
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - artifactkeeper_opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  artifactkeeper:
+    image: ghcr.io/artifact-keeper/artifact-keeper-backend:1.10.2
+    depends_on:
+      artifactkeeper-db:
+        condition: service_healthy
+      artifactkeeper-opensearch:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://registry:${ARTIFACT_KEEPER_DB_PASSWORD:-pact-local-artifact-db}@artifactkeeper-db:5432/artifact_registry?sslmode=disable
+      OPENSEARCH_URL: http://artifactkeeper-opensearch:9200
+      STORAGE_PATH: /data/storage
+      BACKUP_PATH: /data/backups
+      PLUGINS_DIR: /data/plugins
+      JWT_SECRET: ${ARTIFACT_KEEPER_JWT_SECRET:-pact-local-jwt-secret-not-for-production}
+      INITIAL_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_INITIAL_ADMIN_PASSWORD:-PactLocalInitial1!}
+      AK_WEBHOOK_SECRET_KEY: ${AK_WEBHOOK_SECRET_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      TRIVY_URL: ""
+      OPENSCAP_URL: ""
+      DEPENDENCY_TRACK_ENABLED: "false"
+      ALLOW_HTTP_INTEGRATIONS: "1"
+      HOST: 0.0.0.0
+      PORT: "8080"
+    volumes:
+      - artifactkeeper_storage:/data/storage
+      - artifactkeeper_backups:/data/backups
+      - artifactkeeper_plugins:/data/plugins
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    ports:
+      - "${ARTIFACT_KEEPER_PORT:-8080}:8080"
+
+  artifactkeeper-bootstrap:
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.integration
+    image: pact-integration-tests:local
+    depends_on:
+      artifactkeeper:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/workspace/integration/scripts/bootstrap-artifactkeeper.sh"]
+    environment:
+      ARTIFACT_KEEPER_URL: http://artifactkeeper:8080
+      ARTIFACT_KEEPER_INITIAL_PASSWORD: ${ARTIFACT_KEEPER_INITIAL_ADMIN_PASSWORD:-PactLocalInitial1!}
+      ARTIFACT_KEEPER_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_ADMIN_PASSWORD:-PactLocalAdmin2!}
+      ARTIFACT_KEEPER_TEST_USER: ${PACT_IT_ARTIFACT_KEEPER_USER:-pact-it-user}
+      ARTIFACT_KEEPER_TEST_USER_PASSWORD: ${ARTIFACT_KEEPER_TEST_USER_PASSWORD:-PactLocalUser3!}
+      ARTIFACT_KEEPER_TEST_REPOSITORY: ${PACT_IT_ARTIFACT_KEEPER_REPOSITORY:-pact-it-repo-a}
+    restart: "no"
+
+  pact-postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: ${PACT_POSTGRES_USER:-pact}
+      POSTGRES_PASSWORD: ${PACT_POSTGRES_PASSWORD:-pact-local-postgres}
+    volumes:
+      - pact_postgres_data:/var/lib/postgresql
+      - ./postgres/target-init.sql:/docker-entrypoint-initdb.d/target-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${PACT_POSTGRES_PORT:-5433}:5432"
+
+  pact-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.0.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      ELASTIC_PASSWORD: ${PACT_IT_ELASTICSEARCH_PASSWORD:-PactLocalElastic2!}
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - pact_elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS -u "elastic:$${ELASTIC_PASSWORD}" http://localhost:9200/_security/_authenticate >/dev/null
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    ports:
+      - "${PACT_ELASTICSEARCH_PORT:-9201}:9200"
+
+  backend-live-tests:
+    image: pact-integration-tests:local
+    build:
+      context: ..
+      dockerfile: integration/Dockerfile.integration
+    profiles: ["tests"]
+    depends_on:
+      ranger-bootstrap:
+        condition: service_completed_successfully
+      artifactkeeper-bootstrap:
+        condition: service_completed_successfully
+      pact-postgres:
+        condition: service_healthy
+      pact-elasticsearch:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/workspace/integration/scripts/run-backend-live-tests.sh"]
+    environment:
+      PACT_IT_RANGER_BASE_URL: http://ranger-admin:6080/service
+      PACT_IT_RANGER_USERNAME: ${RANGER_USERNAME:-admin}
+      PACT_IT_RANGER_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
+      PACT_IT_RANGER_SERVICE_NAME: ${PACT_IT_RANGER_SERVICE_NAME:-pact-it-hdfs}
+      PACT_IT_RANGER_RESOURCE: ${PACT_IT_RANGER_RESOURCE:-path}
+      PACT_IT_RANGER_OZONE_SERVICE_NAME: ${PACT_IT_RANGER_OZONE_SERVICE_NAME:-dev_ozone}
+      PACT_IT_RANGER_TRINO_SERVICE_NAME: ${PACT_IT_RANGER_TRINO_SERVICE_NAME:-dev_trino}
+      PACT_IT_RANGER_KAFKA_SERVICE_NAME: ${PACT_IT_RANGER_KAFKA_SERVICE_NAME:-dev_kafka}
+      PACT_IT_RANGER_TEST_USER: ${PACT_IT_RANGER_TEST_USER:-pact-it-user}
+      PACT_IT_ARTIFACT_KEEPER_URL: http://artifactkeeper:8080
+      PACT_IT_ARTIFACT_KEEPER_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_ADMIN_PASSWORD:-PactLocalAdmin2!}
+      PACT_IT_ARTIFACT_KEEPER_USER: ${PACT_IT_ARTIFACT_KEEPER_USER:-pact-it-user}
+      PACT_IT_ARTIFACT_KEEPER_REPOSITORY: ${PACT_IT_ARTIFACT_KEEPER_REPOSITORY:-pact-it-repo-a}
+      PACT_IT_POSTGRESQL_JDBC_URL: jdbc:postgresql://pact-postgres:5432/postgres
+      PACT_IT_POSTGRESQL_USERNAME: ${PACT_POSTGRES_USER:-pact}
+      PACT_IT_POSTGRESQL_PASSWORD: ${PACT_POSTGRES_PASSWORD:-pact-local-postgres}
+      PACT_IT_ELASTICSEARCH_ENDPOINT: http://pact-elasticsearch:9200
+      PACT_IT_ELASTICSEARCH_USERNAME: elastic
+      PACT_IT_ELASTICSEARCH_PASSWORD: ${PACT_IT_ELASTICSEARCH_PASSWORD:-PactLocalElastic2!}
+    restart: "no"
+
+  pact-e2e:
+    image: pact-integration-tests:local
+    profiles: ["e2e"]
+    depends_on:
+      ranger-bootstrap:
+        condition: service_completed_successfully
+      artifactkeeper-bootstrap:
+        condition: service_completed_successfully
+      pact-postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/workspace/integration/scripts/run-e2e.sh"]
+    environment:
+      PACT_IT_RANGER_BASE_URL: http://ranger-admin:6080/service
+      PACT_IT_RANGER_USERNAME: ${RANGER_USERNAME:-admin}
+      PACT_IT_RANGER_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
+      PACT_IT_RANGER_SERVICE_NAME: ${PACT_IT_RANGER_SERVICE_NAME:-pact-it-hdfs}
+      PACT_IT_ARTIFACT_KEEPER_URL: http://artifactkeeper:8080
+      PACT_IT_ARTIFACT_KEEPER_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_ADMIN_PASSWORD:-PactLocalAdmin2!}
+      PACT_POSTGRES_USER: ${PACT_POSTGRES_USER:-pact}
+      PACT_POSTGRES_PASSWORD: ${PACT_POSTGRES_PASSWORD:-pact-local-postgres}
+    volumes:
+      - ./e2e:/etc/pact:ro
+    restart: "no"
+
+volumes:
+  artifactkeeper_postgres_data:
+  artifactkeeper_opensearch_data:
+  artifactkeeper_storage:
+  artifactkeeper_backups:
+  artifactkeeper_plugins:
+  pact_postgres_data:
+  pact_elasticsearch_data:

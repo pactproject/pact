@@ -1,0 +1,17 @@
+PACT controller {{ include "pact.fullname" . }} is installed in namespace {{ .Release.Namespace }}.
+
+The controller watches DataAccess resources across namespaces. Ensure the
+required backend configuration is present in the rendered ConfigMap.
+{{- if .Values.secretAccess.create }}
+
+Secret get access has been granted only to the names and namespaces listed in
+secretAccess.grants. It does not include list or watch permissions.
+{{- end }}
+{{- if .Values.crd.create }}
+
+The DataAccess CRD is retained on Helm uninstall. CRD schema upgrades and
+deletion must be managed deliberately.
+{{- else }}
+
+Install the DataAccess CRD separately before creating DataAccess resources.
+{{- end }}

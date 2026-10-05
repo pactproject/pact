@@ -2,6 +2,7 @@ package io.github.pactproject.postgresql;
 
 import io.github.pactproject.api.Backend;
 import io.github.pactproject.api.BackendTransaction;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.exception.BackendException;
 import io.github.pactproject.api.exception.BackendOperationException;
@@ -45,6 +46,10 @@ public final class PostgreSqlBackend implements Backend {
     ) throws BackendException {
         compile(previousState);
         Set<Grant> desiredGrants = compile(desiredState);
+        Set<Identity> previousIdentities =
+                compileIdentities(previousState);
+        Set<Identity> desiredIdentities =
+                compileIdentities(desiredState);
         Set<String> databases = new HashSet<>(
                 GrantCompiler.databases(previousState, id)
         );
@@ -64,6 +69,10 @@ public final class PostgreSqlBackend implements Backend {
         return new BackendTransaction() {
             @Override
             public void apply() throws BackendException {
+                reconcileIdentities(
+                        previousIdentities,
+                        desiredIdentities
+                );
                 synchronize(scope, desiredGrants, "apply");
             }
 
@@ -72,6 +81,36 @@ public final class PostgreSqlBackend implements Backend {
                 synchronize(scope, snapshot, "rollback");
             }
         };
+    }
+
+    private Set<Identity> compileIdentities(PactState state)
+            throws ValidationException {
+        for (Identity identity : state.identities()) {
+            if (!id.equals(identity.backendId())) {
+                throw new ValidationException(
+                        "Identity backend '" + identity.backendId()
+                                + "' does not match PostgreSQL backend '"
+                                + id + "'"
+                );
+            }
+        }
+        return state.identities();
+    }
+
+    private void reconcileIdentities(
+            Set<Identity> previous,
+            Set<Identity> desired
+    ) throws BackendException {
+        try {
+            client.reconcileIdentities(previous, desired);
+        }
+        catch (PostgreSqlClientException e) {
+            throw new BackendOperationException(
+                    "Failed to reconcile PostgreSQL identities for backend '"
+                            + id + "'",
+                    e
+            );
+        }
     }
 
     private Set<Grant> compile(PactState state)

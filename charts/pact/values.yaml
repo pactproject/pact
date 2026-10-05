@@ -1,0 +1,75 @@
+image:
+  repository: pact
+  pullPolicy: IfNotPresent
+  tag: latest
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+dataAccess:
+  group: com.example.ru
+  version: v1
+  plural: dataaccesses
+  singular: dataaccess
+
+serviceAccount:
+  create: true
+  name: ""
+  automount: true
+
+rbac:
+  create: true
+
+crd:
+  create: true
+
+secretAccess:
+  create: false
+  readAll: false
+  grants: []
+  # grants:
+  #   - namespace: payments
+  #     names:
+  #       - app-credentials
+
+pact:
+  stateProvider:
+    config:
+      informer-resync-millis: "5000"
+      informer-start-timeout-seconds: "30"
+      status-retry-delays-millis: "100,200,400"
+  backends: []
+  # backends:
+  #   - id: production-postgres
+  #     type: postgresql
+  #     config:
+  #       jdbc-url: jdbc:postgresql://postgres.example:5432/postgres
+  #       username: pact
+  #       password: ${PG_PASSWORD}
+
+extraEnv: []
+# extraEnv:
+#   - name: PG_PASSWORD
+#     valueFrom:
+#       secretKeyRef:
+#         name: postgres-credentials
+#         key: password
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources: {}
+terminationGracePeriodSeconds: 60

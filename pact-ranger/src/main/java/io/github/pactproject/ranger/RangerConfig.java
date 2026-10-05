@@ -8,8 +8,19 @@ public record RangerConfig(
         String username,
         String password,
         String serviceName,
-        int pageSize
+        int pageSize,
+        boolean managedOnly
 ) {
+    public RangerConfig(
+            URI baseUrl,
+            String username,
+            String password,
+            String serviceName,
+            int pageSize
+    ) {
+        this(baseUrl, username, password, serviceName, pageSize, false);
+    }
+
     public static RangerConfig from(Map<String, String> config) {
         URI baseUrl = URI.create(require(config, "base-url"));
         if (!baseUrl.isAbsolute()
@@ -35,13 +46,29 @@ public record RangerConfig(
                     "Ranger page-size must be a positive integer"
             );
         }
+        boolean managedOnly = parseBoolean(
+                config.getOrDefault("managed-only", "false")
+        );
 
         return new RangerConfig(
                 baseUrl,
                 require(config, "username"),
                 require(config, "password"),
                 require(config, "service-name"),
-                pageSize
+                pageSize,
+                managedOnly
+        );
+    }
+
+    private static boolean parseBoolean(String value) {
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException(
+                "Ranger managed-only must be true or false"
         );
     }
 

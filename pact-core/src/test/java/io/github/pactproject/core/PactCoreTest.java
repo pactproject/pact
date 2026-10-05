@@ -3,9 +3,11 @@ package io.github.pactproject.core;
 import io.github.pactproject.api.Access;
 import io.github.pactproject.api.Backend;
 import io.github.pactproject.api.BackendTransaction;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.exception.BackendException;
 import io.github.pactproject.api.Resource;
+import io.github.pactproject.api.SecretValue;
 import io.github.pactproject.api.exception.BackendOperationException;
 import io.github.pactproject.core.exception.ApplyException;
 import io.github.pactproject.core.exception.BackendNotFoundException;
@@ -49,6 +51,50 @@ class PactCoreTest {
 
         assertEquals(1, backend.applyCount());
         assertEquals(state, backend.currentState());
+    }
+
+    @Test
+    void reconcilesIdentityOnlyBackendAndRedactsPassword() throws Exception {
+        var backend = new TestBackend("postgres");
+        var core = new PactCore(List.of(backend));
+        var state = new PactState(
+                Set.of(),
+                Set.of(new Identity(
+                        "postgres",
+                        "app",
+                        true,
+                        "app-secret/password",
+                        "7",
+                        new SecretValue("do-not-log")
+                ))
+        );
+
+        assertTrue(!state.toString().contains("do-not-log"));
+        core.apply(state);
+        core.apply(state);
+
+        assertEquals(1, backend.applyCount());
+    }
+
+    @Test
+    void rejectsUnknownBackendReferencedOnlyByIdentity() {
+        var core = new PactCore(List.of(new TestBackend("postgres")));
+        var state = new PactState(
+                Set.of(),
+                Set.of(new Identity(
+                        "unknown",
+                        "app",
+                        true,
+                        null,
+                        null,
+                        null
+                ))
+        );
+
+        assertThrows(
+                BackendNotFoundException.class,
+                () -> core.apply(state)
+        );
     }
 
     @Test

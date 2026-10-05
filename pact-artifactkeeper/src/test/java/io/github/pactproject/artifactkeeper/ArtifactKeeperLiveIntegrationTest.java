@@ -64,6 +64,7 @@ class ArtifactKeeperLiveIntegrationTest {
                     client.getPermissions(),
                     userId,
                     repositoryId,
+                    "user",
                     Set.of("read")
             );
 
@@ -73,6 +74,7 @@ class ArtifactKeeperLiveIntegrationTest {
                     client.getPermissions(),
                     userId,
                     repositoryId,
+                    "user",
                     Set.of("read", "write")
             );
 
@@ -81,6 +83,7 @@ class ArtifactKeeperLiveIntegrationTest {
                     client.getPermissions(),
                     userId,
                     repositoryId,
+                    "user",
                     Set.of("read", "write")
             );
 
@@ -140,6 +143,7 @@ class ArtifactKeeperLiveIntegrationTest {
                     client.getPermissions(),
                     userId,
                     repositoryId,
+                    "service_account",
                     Set.of("read")
             );
         }
@@ -260,11 +264,12 @@ class ArtifactKeeperLiveIntegrationTest {
             List<ArtifactKeeperApiPermission> permissions,
             String expectedUserId,
             String expectedRepositoryId,
+            String expectedPrincipalType,
             Set<String> expectedActions
     ) {
         var permission = permissions.stream()
                 .filter(candidate ->
-                        candidate.principalType().equals("user")
+                        candidate.principalType().equals(expectedPrincipalType)
                                 && candidate.targetType().equals("repository"))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("Expected an Artifact Keeper permission"));

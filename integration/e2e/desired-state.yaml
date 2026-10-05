@@ -1,0 +1,27 @@
+accesses:
+  - principal: pact-it-ranger-user
+    resource:
+      backendId: pact-it-hdfs
+      target:
+        path: /pact-it-local-e2e
+    attributes:
+      permissions:
+        path:
+          - read
+  - principal: pact-it-user
+    resource:
+      backendId: registry
+      target:
+        repository: pact-it-repo-a
+    attributes:
+      actions:
+        - read
+  - principal: pact_it_user
+    resource:
+      backendId: pact-it-postgres
+      target:
+        database: pact_it
+    attributes:
+      permissions:
+        database:
+          - CONNECT

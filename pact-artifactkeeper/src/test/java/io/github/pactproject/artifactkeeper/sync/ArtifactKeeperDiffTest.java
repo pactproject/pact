@@ -177,6 +177,7 @@ class ArtifactKeeperDiffTest {
     ) {
         return new ArtifactKeeperPermission(
                 "repository-a",
+                username.startsWith("svc-") ? "service_account" : "user",
                 username,
                 Set.of(actions)
         );
@@ -189,6 +190,7 @@ class ArtifactKeeperDiffTest {
         return new ActualArtifactKeeperPermission(
                 "permission-1",
                 "repository-a",
+                username.startsWith("svc-") ? "service_account" : "user",
                 username,
                 Set.of(actions)
         );

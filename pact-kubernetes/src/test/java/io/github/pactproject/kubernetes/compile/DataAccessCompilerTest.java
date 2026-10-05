@@ -1,6 +1,7 @@
 package io.github.pactproject.kubernetes.compile;
 
 import io.github.pactproject.api.Access;
+import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.value.BooleanValue;
 import io.github.pactproject.api.value.ObjectValue;
@@ -574,6 +575,51 @@ class DataAccessCompilerTest
                         .map(access -> access.resource().target())
                         .collect(java.util.stream.Collectors.toSet())
         );
+    }
+
+    @Test
+    void compilesTopLevelIdentityDeclarations() {
+        PactState state = compiler.compile(List.of(Map.of(
+                "resources", List.of(),
+                "identities", List.of(
+                        Map.of(
+                                "backend", "analytics-db",
+                                "name", "app",
+                                "ensure", true,
+                                "passwordSecretRef", Map.of(
+                                        "name", "app-credentials",
+                                        "key", "password"
+                                )
+                        ),
+                        Map.of(
+                                "backend", "analytics-db",
+                                "name", "reporter"
+                        )
+                )
+        )));
+
+        assertEquals(
+                Set.of(
+                        new Identity(
+                                "analytics-db",
+                                "app",
+                                true,
+                                "app-credentials/password",
+                                null,
+                                null
+                        ),
+                        new Identity(
+                                "analytics-db",
+                                "reporter",
+                                false,
+                                null,
+                                null,
+                                null
+                        )
+                ),
+                state.identities()
+        );
+        assertTrue(state.accesses().isEmpty());
     }
 
     @Test

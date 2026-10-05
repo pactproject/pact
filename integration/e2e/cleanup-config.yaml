@@ -1,0 +1,24 @@
+stateProvider:
+  type: filesystem
+  config:
+    path: /etc/pact/empty-state.yaml
+backends:
+  - id: pact-it-hdfs
+    type: ranger
+    config:
+      base-url: ${PACT_IT_RANGER_BASE_URL}
+      username: ${PACT_IT_RANGER_USERNAME}
+      password: ${PACT_IT_RANGER_PASSWORD}
+      service-name: ${PACT_IT_RANGER_SERVICE_NAME}
+      managed-only: "true"
+  - id: registry
+    type: artifact-keeper
+    config:
+      url: ${PACT_IT_ARTIFACT_KEEPER_URL}
+      token: ${PACT_IT_ARTIFACT_KEEPER_TOKEN}
+  - id: pact-it-postgres
+    type: postgresql
+    config:
+      jdbc-url: jdbc:postgresql://pact-postgres:5432/postgres
+      username: ${PACT_POSTGRES_USER}
+      password: ${PACT_POSTGRES_PASSWORD}

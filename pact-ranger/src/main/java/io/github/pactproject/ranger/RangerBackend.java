@@ -31,7 +31,8 @@ public final class RangerBackend implements Backend {
         this.sync = new RangerPolicySync(
                 client,
                 config.serviceName(),
-                config.pageSize()
+                config.pageSize(),
+                config.managedOnly()
         );
     }
 
@@ -63,10 +64,11 @@ public final class RangerBackend implements Backend {
             List<ObjectNode> desired = RangerPolicyCompiler.compile(
                     desiredState,
                     parsedDefinition,
+                    id,
                     serviceType,
                     config.serviceName()
             );
-            List<JsonNode> snapshot = sync.getManagedPolicies();
+            List<JsonNode> snapshot = sync.getPoliciesInScope();
 
             return new BackendTransaction() {
                 @Override
@@ -82,7 +84,7 @@ public final class RangerBackend implements Backend {
                 private void synchronize(List<? extends JsonNode> target)
                         throws BackendException {
                     try {
-                        sync.synchronize(sync.getManagedPolicies(), target);
+                        sync.synchronize(sync.getPolicies(), target);
                     }
                     catch (RangerClientException
                            | IllegalArgumentException e) {
