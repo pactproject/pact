@@ -11,11 +11,16 @@ import io.github.pactproject.postgresql.api.PostgreSqlClient;
 import io.github.pactproject.postgresql.api.PostgreSqlClientException;
 import io.github.pactproject.postgresql.compile.GrantCompiler;
 import io.github.pactproject.postgresql.model.Grant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashSet;
 import java.util.Set;
 
 public final class PostgreSqlBackend implements Backend {
+    private static final Logger log =
+            LoggerFactory.getLogger(PostgreSqlBackend.class);
+
     private final String id;
     private final PostgreSqlClient client;
 
@@ -66,19 +71,45 @@ public final class PostgreSqlBackend implements Backend {
                     e
             );
         }
+        log.debug(
+                "Prepared PostgreSQL backend '{}' with {} desired grant(s), "
+                        + "{} snapshot grant(s), {} database(s), and {} desired identity/identities",
+                id,
+                desiredGrants.size(),
+                snapshot.size(),
+                scope.size(),
+                desiredIdentities.size()
+        );
         return new BackendTransaction() {
             @Override
             public void apply() throws BackendException {
+                log.info(
+                        "Reconciling PostgreSQL backend '{}' ({} identity/identities, "
+                                + "{} grant(s) across {} database(s))",
+                        id,
+                        desiredIdentities.size(),
+                        desiredGrants.size(),
+                        scope.size()
+                );
                 reconcileIdentities(
                         previousIdentities,
                         desiredIdentities
                 );
                 synchronize(scope, desiredGrants, "apply");
+                log.info("Reconciled PostgreSQL backend '{}'", id);
             }
 
             @Override
             public void rollback() throws BackendException {
+                log.info(
+                        "Rolling back PostgreSQL grants for backend '{}' "
+                                + "({} grant(s) across {} database(s))",
+                        id,
+                        snapshot.size(),
+                        scope.size()
+                );
                 synchronize(scope, snapshot, "rollback");
+                log.info("Rolled back PostgreSQL grants for backend '{}'", id);
             }
         };
     }

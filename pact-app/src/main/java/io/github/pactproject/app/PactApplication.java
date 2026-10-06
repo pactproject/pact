@@ -59,6 +59,11 @@ public final class PactApplication
             Path pluginsDirectory)
             throws PactApplicationException
     {
+        log.info(
+                "Initializing PACT from config '{}' with plugins in '{}'",
+                configPath,
+                pluginsDirectory
+        );
         try {
             PactConfigLoader configLoader =
                     new PactConfigLoader();
@@ -83,6 +88,11 @@ public final class PactApplication
                                 registry
                         ).create(config);
 
+                log.info(
+                        "Initialized PACT with state provider '{}' and {} backend(s)",
+                        config.stateProvider().type(),
+                        config.backends().size()
+                );
                 PactCore core =
                         new PactCore(
                                 components.backends()
@@ -140,10 +150,12 @@ public final class PactApplication
             throws PactApplicationException
     {
         if (managedStateProvider != null) {
+            log.info("Starting PACT managed state provider");
             runManagedController();
             return;
         }
 
+        log.info("Starting PACT one-shot reconciliation");
         try {
             reconciliationQueue
                     .submit()
@@ -221,6 +233,7 @@ public final class PactApplication
             return;
         }
         closed = true;
+        log.info("Shutting down PACT");
         RuntimeException closeFailure = null;
         try {
             if (managedStateProvider != null) {
@@ -250,5 +263,6 @@ public final class PactApplication
         if (closeFailure != null) {
             throw closeFailure;
         }
+        log.info("PACT shutdown complete");
     }
 }

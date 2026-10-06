@@ -1,9 +1,13 @@
 package io.github.pactproject.app;
 
 import java.nio.file.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class Main
 {
+    private static final Logger log = LoggerFactory.getLogger(Main.class);
+
     private Main()
     {
     }
@@ -28,10 +32,7 @@ public final class Main
             );
         }
         catch (Exception e) {
-            System.err.println(
-                    "PACT failed: " + e.getMessage()
-            );
-            e.printStackTrace(System.err);
+            log.error("PACT failed during initialization", e);
             System.exit(1);
             return;
         }
@@ -46,12 +47,7 @@ public final class Main
             application.run();
         }
         catch (Exception e) {
-            System.err.println(
-                    "PACT failed: " + e.getMessage()
-            );
-
-            e.printStackTrace(System.err);
-
+            log.error("PACT failed during execution", e);
             System.exit(1);
         }
     }
@@ -62,9 +58,7 @@ public final class Main
             application.close();
         }
         catch (Exception e) {
-            System.err.println(
-                    "Failed to close PACT cleanly: " + e.getMessage()
-            );
+            log.warn("Failed to close PACT cleanly", e);
         }
     }
 }

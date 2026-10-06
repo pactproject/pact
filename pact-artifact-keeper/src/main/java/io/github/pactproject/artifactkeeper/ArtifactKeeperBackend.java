@@ -16,12 +16,17 @@ import io.github.pactproject.artifactkeeper.model.ArtifactKeeperState;
 import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperCompiler;
 import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperDiff;
 import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperResolver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
 public final class ArtifactKeeperBackend
         implements Backend
 {
+    private static final Logger log =
+            LoggerFactory.getLogger(ArtifactKeeperBackend.class);
+
     private final String id;
     private final ArtifactKeeperClient client;
 
@@ -59,7 +64,21 @@ public final class ArtifactKeeperBackend
                         desired
                 );
 
+        log.debug(
+                "Artifact Keeper backend '{}' permission diff: {} create, {} delete",
+                id,
+                diff.create().size(),
+                diff.delete().size()
+        );
         applyDiff(diff);
+        log.info(
+                "Reconciled Artifact Keeper backend '{}' ({} desired permission(s), "
+                        + "{} created, {} deleted)",
+                id,
+                desired.size(),
+                diff.create().size(),
+                diff.delete().size()
+        );
     }
 
     private List<ArtifactKeeperPermission> compileDesiredState(
@@ -222,12 +241,20 @@ public final class ArtifactKeeperBackend
             throws BackendOperationException
     {
         try {
-            ArtifactKeeperApiUser user =
+                log.info(
+                        "Creating Artifact Keeper service account for backend '{}'",
+                        id
+                );
+                ArtifactKeeperApiUser user =
                     client.createServiceAccount(
                             username.substring("svc-".length())
                     );
 
             state = state.addUser(user);
+            log.info(
+                    "Created Artifact Keeper service account for backend '{}'",
+                    id
+            );
 
             return user;
         }

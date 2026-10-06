@@ -15,6 +15,8 @@ import io.github.pactproject.elasticsearch.api.ElasticsearchClient;
 import io.github.pactproject.elasticsearch.api.ElasticsearchClientException;
 import io.github.pactproject.elasticsearch.compile.ElasticsearchRoleCompiler;
 import io.github.pactproject.elasticsearch.model.ElasticsearchRole;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.security.SecureRandom;
 import java.util.Base64;
@@ -26,6 +28,9 @@ import java.util.Set;
 import java.util.TreeSet;
 
 public final class ElasticsearchBackend implements Backend {
+    private static final Logger log =
+            LoggerFactory.getLogger(ElasticsearchBackend.class);
+
     private static final String MANAGED_BY = "pact";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -106,9 +111,23 @@ public final class ElasticsearchBackend implements Backend {
             );
         }
 
+        log.debug(
+                "Prepared Elasticsearch backend '{}' with {} desired role(s) "
+                        + "across {} principal(s)",
+                id,
+                desired.size(),
+                principals.size()
+        );
         return new BackendTransaction() {
             @Override
             public void apply() throws BackendException {
+                log.info(
+                        "Reconciling Elasticsearch backend '{}' "
+                                + "({} role(s) across {} principal(s))",
+                        id,
+                        desired.size(),
+                        principals.size()
+                );
                 try {
                     Set<String> createdDuringApply = new HashSet<>();
                     for (ElasticsearchRole role : desired.values()) {
@@ -161,6 +180,13 @@ public final class ElasticsearchBackend implements Backend {
                                 client.deleteRole(role);
                             }
                         }
+                        log.info(
+                                "Reconciled Elasticsearch backend '{}' "
+                                        + "({} role(s) across {} principal(s))",
+                                id,
+                                desired.size(),
+                                principals.size()
+                        );
                     }
                     for (String principal : desired.keySet()) {
                         Identity identity = desiredIdentities.get(principal);
@@ -189,6 +215,11 @@ public final class ElasticsearchBackend implements Backend {
 
             @Override
             public void rollback() throws BackendException {
+                log.info(
+                        "Rolling back Elasticsearch backend '{}' across {} principal(s)",
+                        id,
+                        principals.size()
+                );
                 ElasticsearchClientException failure = null;
                 for (String principal : principals) {
                     String role = roleName(principal);
@@ -250,6 +281,7 @@ public final class ElasticsearchBackend implements Backend {
                             failure
                     );
                 }
+                log.info("Rolled back Elasticsearch backend '{}'", id);
             }
         };
     }

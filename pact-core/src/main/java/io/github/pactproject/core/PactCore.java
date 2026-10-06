@@ -146,6 +146,11 @@ public final class PactCore {
 
         validateBackends(restoredState);
         appliedState = restoredState.withoutSecrets();
+        log.info(
+                "Restored applied state with {} access(es) and {} identity/identities",
+                appliedState.accesses().size(),
+                appliedState.identities().size()
+        );
     }
 
     private void validateBackends(PactState desiredState)

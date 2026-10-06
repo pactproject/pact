@@ -2,6 +2,8 @@ package io.github.pactproject.app.plugin;
 
 import io.github.pactproject.api.BackendFactory;
 import io.github.pactproject.api.StateProviderFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URL;
@@ -14,6 +16,9 @@ import java.util.ServiceLoader;
 
 public final class PluginLoader
 {
+    private static final Logger log =
+            LoggerFactory.getLogger(PluginLoader.class);
+
     public PluginSet load(Path pluginsDirectory)
             throws PluginLoadException
     {
@@ -51,6 +56,13 @@ public final class PluginLoader
                             classLoader
                     );
 
+            log.debug(
+                    "Loaded {} plugin jar(s), {} backend factory/factories, "
+                            + "and {} state provider factory/factories",
+                    pluginUrls.size(),
+                    backendFactories.size(),
+                    stateProviderFactories.size()
+            );
             return new PluginSet(
                     classLoader,
                     backendFactories,

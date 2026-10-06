@@ -11,10 +11,15 @@ import io.github.pactproject.ranger.api.RangerClientException;
 import io.github.pactproject.ranger.compile.RangerPolicyCompiler;
 import io.github.pactproject.ranger.compile.RangerServiceDefinition;
 import io.github.pactproject.ranger.sync.RangerPolicySync;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
 public final class RangerBackend implements Backend {
+    private static final Logger log =
+            LoggerFactory.getLogger(RangerBackend.class);
+
     private final String id;
     private final RangerConfig config;
     private final RangerClient client;
@@ -69,16 +74,41 @@ public final class RangerBackend implements Backend {
                     config.serviceName()
             );
             List<JsonNode> snapshot = sync.getPoliciesInScope();
+            log.debug(
+                    "Prepared Ranger reconciliation for backend '{}' with {} desired "
+                            + "policy/policies and {} snapshot policy/policies",
+                    id,
+                    desired.size(),
+                    snapshot.size()
+            );
 
             return new BackendTransaction() {
                 @Override
                 public void apply() throws BackendException {
+                    log.info(
+                            "Applying {} Ranger policy/policies for backend '{}'",
+                            desired.size(),
+                            id
+                    );
                     synchronize(desired);
+                    log.info(
+                            "Applied Ranger policies for backend '{}'",
+                            id
+                    );
                 }
 
                 @Override
                 public void rollback() throws BackendException {
+                    log.info(
+                            "Restoring {} Ranger policy/policies for backend '{}'",
+                            snapshot.size(),
+                            id
+                    );
                     synchronize(snapshot);
+                    log.info(
+                            "Restored Ranger policies for backend '{}'",
+                            id
+                    );
                 }
 
                 private void synchronize(List<? extends JsonNode> target)

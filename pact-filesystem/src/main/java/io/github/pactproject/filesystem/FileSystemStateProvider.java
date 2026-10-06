@@ -9,6 +9,8 @@ import io.github.pactproject.api.Resource;
 import io.github.pactproject.api.StateProvider;
 import io.github.pactproject.api.exception.StateProviderException;
 import io.github.pactproject.api.value.Value;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -21,6 +23,9 @@ import java.util.Set;
 public final class FileSystemStateProvider
         implements StateProvider
 {
+    private static final Logger log =
+            LoggerFactory.getLogger(FileSystemStateProvider.class);
+
     private final Path path;
     private final ObjectMapper mapper;
 
@@ -34,10 +39,16 @@ public final class FileSystemStateProvider
     public PactState load()
             throws StateProviderException
     {
+        log.info("Loading desired state from '{}'", path);
         try {
             JsonNode root = mapper.readTree(path.toFile());
-
-            return parseState(root);
+            PactState state = parseState(root);
+            log.info(
+                    "Loaded desired state with {} access(es) from '{}'",
+                    state.accesses().size(),
+                    path
+            );
+            return state;
         }
         catch (IOException | RuntimeException e) {
             throw new StateProviderException(

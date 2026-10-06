@@ -140,12 +140,19 @@ public final class DataAccessController
                             new DataAccessEventHandler(),
                             config.informerResyncMillis()
                     );
+            long syncStartNanos = System.nanoTime();
             awaitInformerSync();
             started = true;
             log.info(
-                    "Started DataAccess informer for {}/{}",
+                    "Started DataAccess informer for {}/{}; restored applied state "
+                            + "for {}/{} resource(s), informer sync took {} ms",
                     config.group(),
-                    config.plural()
+                    config.plural(),
+                    appliedResources.size(),
+                    resources.size(),
+                    TimeUnit.NANOSECONDS.toMillis(
+                            System.nanoTime() - syncStartNanos
+                    )
             );
         }
         catch (Exception e) {
@@ -318,10 +325,23 @@ public final class DataAccessController
                         && hasPasswordSecretVersionChanged(resource, key)) {
                     enqueue(new DataAccessEvent(EventType.APPLY, resource, key));
                 }
+                else {
+                    log.debug(
+                            "Ignoring DataAccess update for {}/{} without a spec change",
+                            key.namespace(),
+                            key.name()
+                    );
+                }
                 return;
             }
             if (observedGeneration != null
                     && generation == observedGeneration) {
+                log.debug(
+                        "Ignoring DataAccess update for {}/{} at observed generation {}",
+                        key.namespace(),
+                        key.name(),
+                        generation
+                );
                 return;
             }
             enqueue(new DataAccessEvent(EventType.APPLY, resource, key));
@@ -410,7 +430,7 @@ public final class DataAccessController
 
     private void process(DataAccessEvent event)
     {
-        log.info(
+        log.debug(
                 "Processing DataAccess {} event for {}/{}",
                 event.type(),
                 event.key().namespace(),
@@ -489,6 +509,15 @@ public final class DataAccessController
                             true,
                             secretVersions(resourceState)
                     )
+            );
+            log.info(
+                    "Reconciled DataAccess {}/{} generation {} with {} access(es) "
+                            + "and {} identity/identities",
+                    event.key().namespace(),
+                    event.key().name(),
+                    generation,
+                    resourceState.accesses().size(),
+                    resourceState.identities().size()
             );
         }
         catch (IllegalArgumentException e) {
@@ -600,6 +629,11 @@ public final class DataAccessController
 
         try {
             removeFinalizer(event.key());
+            log.info(
+                    "Deleted DataAccess {}/{} after backend cleanup",
+                    event.key().namespace(),
+                    event.key().name()
+            );
         }
         catch (RuntimeException e) {
             log.error(
@@ -984,6 +1018,11 @@ public final class DataAccessController
                         PatchContext.of(PatchType.JSON_MERGE),
                         patch
                 );
+        log.debug(
+                "Added DataAccess finalizer to {}/{}",
+                key.namespace(),
+                key.name()
+        );
         return FinalizerResult.ADDED;
     }
 
@@ -1002,6 +1041,11 @@ public final class DataAccessController
                 .inNamespace(key.namespace())
                 .withName(key.name())
                 .patch(current);
+        log.debug(
+                "Removed DataAccess finalizer from {}/{}",
+                key.namespace(),
+                key.name()
+        );
     }
 
     private io.fabric8.kubernetes.client.dsl.Resource<GenericKubernetesResource> resource(
