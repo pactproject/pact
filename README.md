@@ -159,12 +159,12 @@ secret mechanism rather than baking them into the image.
 
 GitHub Actions builds the image for pull requests and publishes it to GHCR
 when a version tag starting with `v` is pushed. For example, to publish and
-pull version `1.2.3`:
+pull version `1.0.0`:
 
 ```shell
-git tag v1.2.3
-git push origin v1.2.3
-docker pull ghcr.io/pactproject/pact:v1.2.3
+git tag v1.0.0
+git push origin v1.0.0
+docker pull ghcr.io/pactproject/pact:v1.0.0
 ```
 
 GHCR package visibility is managed in GitHub; make the package public there if
