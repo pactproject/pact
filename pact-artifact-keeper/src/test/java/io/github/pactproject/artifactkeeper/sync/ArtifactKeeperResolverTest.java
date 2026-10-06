@@ -46,7 +46,7 @@ class ArtifactKeeperResolverTest {
     }
 
     @Test
-    void resolvesServiceAccountPermission() {
+    void resolvesLegacyServiceAccountTypeForCleanup() {
         var state = new ArtifactKeeperState(
                 List.of(new ArtifactKeeperApiUser("user-1", "svc-build")),
                 List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),

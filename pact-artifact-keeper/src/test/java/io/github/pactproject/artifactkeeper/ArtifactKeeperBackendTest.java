@@ -261,7 +261,7 @@ class ArtifactKeeperBackendTest {
                 client.getUsers().get(0).id(),
                 permission.principalId()
         );
-        assertEquals("service_account", permission.principalType());
+        assertEquals("user", permission.principalType());
     }
 
     @Test

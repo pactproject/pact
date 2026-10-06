@@ -143,7 +143,7 @@ class ArtifactKeeperLiveIntegrationTest {
                     client.getPermissions(),
                     userId,
                     repositoryId,
-                    "service_account",
+                    "user",
                     Set.of("read")
             );
         }

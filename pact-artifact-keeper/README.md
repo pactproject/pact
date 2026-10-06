@@ -1,6 +1,6 @@
 # PACT Artifact Keeper backend
 
-`pact-artifactkeeper` currently reconciles user permissions on Artifact Keeper
+`pact-artifact-keeper` currently reconciles user permissions on Artifact Keeper
 repositories. Its configured backend instance is the authoritative source of
 truth for the permissions returned by the Artifact Keeper `GET
 /api/v1/permissions` endpoint: a permission absent from PACT's desired state is
@@ -15,12 +15,13 @@ PACT resolves usernames and repository names to Artifact Keeper IDs before
 creating permissions. Principals beginning with `svc-` are treated as service
 accounts; other principals are treated as users.
 
-The current resolver accepts actual permissions only when the principal type
-is `user` or `service_account` and the target type is `repository`. If the
-configured Artifact Keeper instance contains permissions with another
-principal or target type, reconciliation fails during actual-state resolution
-before applying the permission diff. The backend can create missing
-`svc-` service accounts; it does not manage identity passwords.
+PACT creates a missing `svc-` service account through the service-account API,
+but its permission request uses `principal_type: user`, matching the working
+TypeScript backend. The Java resolver accepts legacy `service_account`
+permission entries only so reconciliation can replace them with the
+`user`-typed desired permission. Other principal types and target types fail
+actual-state resolution before the permission diff. The backend does not
+manage identity passwords.
 
 The HTTP permission API is more generic than the current PACT model: permission
 requests contain `principal_type`, `principal_id`, `target_type`, `target_id`,

@@ -1,25 +1,46 @@
 #!/bin/sh
 set -eu
 
-login_response=$(curl -sS -X POST "$ARTIFACT_KEEPER_URL/api/v1/auth/login" \
-    -H 'Content-Type: application/json' \
-    --data "$(jq -n --arg username admin \
-        --arg password "$ARTIFACT_KEEPER_ADMIN_PASSWORD" \
-        '{username: $username, password: $password}')" || true)
-admin_token=$(printf '%s' "$login_response" | jq -r '.access_token // empty' 2>/dev/null || true)
-
-if [ -z "$admin_token" ]; then
-    initial_response=$(curl -fsS -X POST "$ARTIFACT_KEEPER_URL/api/v1/auth/login" \
+login() {
+    password=$1
+    response=$(curl -sS -X POST "$ARTIFACT_KEEPER_URL/api/v1/auth/login" \
         -H 'Content-Type: application/json' \
         --data "$(jq -n --arg username admin \
-            --arg password "$ARTIFACT_KEEPER_INITIAL_PASSWORD" \
-            '{username: $username, password: $password}')")
-    initial_token=$(printf '%s' "$initial_response" | jq -er '.access_token')
+            --arg password "$password" \
+            '{username: $username, password: $password}')") || return 1
+    printf '%s' "$response" | jq -r '.access_token // empty' 2>/dev/null
+}
+
+admin_token=$(login "$ARTIFACT_KEEPER_ADMIN_PASSWORD" || true)
+
+if [ -z "$admin_token" ]; then
+    configured_initial_password=${ARTIFACT_KEEPER_INITIAL_PASSWORD:-}
+    initial_password=$configured_initial_password
+    if [ -r /data/storage/admin.password ]; then
+        stored_password=
+        IFS= read -r stored_password < /data/storage/admin.password
+        if [ -n "$stored_password" ]; then
+            initial_password=$stored_password
+            admin_token=$(login "$initial_password" || true)
+        fi
+    fi
+    if [ -z "$admin_token" ] && [ -n "$configured_initial_password" ]; then
+        initial_password=$configured_initial_password
+        admin_token=$(login "$initial_password" || true)
+    fi
+    if [ -z "$admin_token" ]; then
+        echo "Could not log in to Artifact Keeper with the configured or stored admin password." >&2
+        exit 1
+    fi
+
     curl -fsS -X POST "$ARTIFACT_KEEPER_URL/api/v1/users/me/password" \
-        -H "Authorization: Bearer $initial_token" \
+        -H "Authorization: Bearer $admin_token" \
         -H 'Content-Type: application/json' \
-        --data "$(jq -n --arg password "$ARTIFACT_KEEPER_ADMIN_PASSWORD" \
-            '{new_password: $password}')" >/dev/null
+        --data "$(jq -n \
+            --arg current_password "$initial_password" \
+            --arg new_password "$ARTIFACT_KEEPER_ADMIN_PASSWORD" \
+            '{current_password: $current_password, new_password: $new_password}')" \
+        >/dev/null
     login_response=$(curl -fsS -X POST "$ARTIFACT_KEEPER_URL/api/v1/auth/login" \
         -H 'Content-Type: application/json' \
         --data "$(jq -n --arg username admin \

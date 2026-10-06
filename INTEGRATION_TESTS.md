@@ -83,7 +83,7 @@ On PowerShell, set the required `$env:PACT_IT_*` variables, then run one module:
 ```powershell
 mvn -pl pact-kubernetes -am -Dtest=KubernetesLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false -Dpact.integration=true test
 mvn -pl pact-ranger -am -Dtest=RangerLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false -Dpact.integration=true test
-mvn -pl pact-artifactkeeper -am -Dtest=ArtifactKeeperLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false -Dpact.integration=true test
+mvn -pl pact-artifact-keeper -am -Dtest=ArtifactKeeperLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false -Dpact.integration=true test
 mvn -pl pact-postgresql -am -Dtest=PostgreSqlLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false -Dpact.integration=true test
 mvn -pl pact-elasticsearch -am -Dtest=ElasticsearchLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false -Dpact.integration=true test
 ```
@@ -132,6 +132,11 @@ This runner executes the Elasticsearch live test alongside the Ranger,
 Artifact Keeper, and PostgreSQL tests. Its test user name and index pattern
 are generated uniquely for each run; the test cleans up only that user's
 owned PACT role and then the user itself.
+
+For Artifact Keeper 1.5.1, Compose sets the server's `ADMIN_PASSWORD` setting.
+The bootstrap job reads the one-time admin password from the storage volume
+when upgrading an existing test volume, then changes it to the configured
+test admin password before creating fixtures.
 
 The bootstrap creates the dedicated Ranger HDFS service and Artifact Keeper
 test user/repositories. Ranger's test image also provides Ozone, Trino, and

@@ -7,7 +7,7 @@ RUN mvn -B install
 
 RUN set -eu; \
     mkdir -p /dist/lib /dist/plugins; \
-    for module in pact-app pact-filesystem pact-kubernetes pact-ranger pact-artifactkeeper pact-postgresql pact-elasticsearch; do \
+    for module in pact-app pact-filesystem pact-kubernetes pact-ranger pact-artifact-keeper pact-postgresql pact-elasticsearch; do \
       mvn -B -f "${module}/pom.xml" \
         org.apache.maven.plugins:maven-dependency-plugin:3.7.1:copy-dependencies \
         -DincludeScope=runtime \
@@ -19,7 +19,7 @@ RUN set -eu; \
     cp pact-filesystem/target/pact-filesystem-*.jar /dist/plugins/; \
     cp pact-kubernetes/target/pact-kubernetes-*.jar /dist/plugins/; \
     cp pact-ranger/target/pact-ranger-*.jar /dist/plugins/; \
-    cp pact-artifactkeeper/target/pact-artifactkeeper-*.jar /dist/plugins/; \
+    cp pact-artifact-keeper/target/pact-artifact-keeper-*.jar /dist/plugins/; \
     cp pact-postgresql/target/pact-postgresql-*.jar /dist/plugins/; \
     cp pact-elasticsearch/target/pact-elasticsearch-*.jar /dist/plugins/
 

@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 public final class ArtifactKeeperDiff {
 
@@ -69,7 +70,8 @@ public final class ArtifactKeeperDiff {
             Key key = new Key(
                     permission.repository(),
                     permission.principalType(),
-                    permission.username()
+                    permission.username(),
+                    sortedActions(permission.actions())
             );
 
             result.merge(
@@ -91,7 +93,8 @@ public final class ArtifactKeeperDiff {
             Key key = new Key(
                     permission.repository(),
                     permission.principalType(),
-                    permission.username()
+                    permission.username(),
+                    sortedActions(permission.actions())
             );
 
             result.merge(
@@ -138,10 +141,15 @@ public final class ArtifactKeeperDiff {
         return Set.copyOf(result);
     }
 
+    private static List<String> sortedActions(Set<String> actions) {
+        return List.copyOf(new TreeSet<>(actions));
+    }
+
     private record Key(
             String repository,
             String principalType,
-            String username
+            String username,
+            List<String> actions
     ) {
     }
 

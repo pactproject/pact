@@ -11,7 +11,7 @@ PACT_IT_ARTIFACT_KEEPER_TOKEN=$(printf '%s' "$login_response" | jq -er '.access_
 export PACT_IT_ARTIFACT_KEEPER_TOKEN
 
 exec mvn -B \
-    -pl pact-ranger,pact-artifactkeeper,pact-postgresql,pact-elasticsearch -am \
+    -pl pact-ranger,pact-artifact-keeper,pact-postgresql,pact-elasticsearch -am \
     -Dtest=RangerLiveIntegrationTest,ArtifactKeeperLiveIntegrationTest,PostgreSqlLiveIntegrationTest,ElasticsearchLiveIntegrationTest \
     -Dsurefire.failIfNoSpecifiedTests=false \
     -Dpact.integration=true test

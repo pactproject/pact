@@ -126,30 +126,20 @@ class ArtifactKeeperDiffTest {
     }
 
     @Test
-    void mergesDuplicateDesiredPermissions() {
+    void keepsDesiredPermissionsWithDifferentActionSetsDistinct() {
         ArtifactKeeperPermission read =
                 permission("alice", "read");
 
         ArtifactKeeperPermission write =
                 permission("alice", "write");
 
-        ArtifactKeeperPermission expected =
-                permission("alice", "read", "write");
-
-        assertEquals(
-                new ArtifactKeeperDiff.PermissionDiff(
-                        List.of(expected),
-                        List.of()
-                ),
-                ArtifactKeeperDiff.diff(
-                        List.of(),
-                        List.of(read, write)
-                )
-        );
+        var diff = ArtifactKeeperDiff.diff(List.of(), List.of(read, write));
+        assertEquals(Set.of(read, write), Set.copyOf(diff.create()));
+        assertEquals(List.of(), diff.delete());
     }
 
     @Test
-    void mergesDuplicateActualPermissions() {
+    void replacesSeparateActualActionSetsWithDesiredCombinedPermission() {
         ActualArtifactKeeperPermission read =
                 actualPermission("alice", "read");
 
@@ -159,16 +149,37 @@ class ArtifactKeeperDiffTest {
         ArtifactKeeperPermission expected =
                 permission("alice", "read", "write");
 
-        assertEquals(
-                new ArtifactKeeperDiff.PermissionDiff(
-                        List.of(),
-                        List.of()
-                ),
-                ArtifactKeeperDiff.diff(
-                        List.of(read, write),
-                        List.of(expected)
-                )
+        var diff = ArtifactKeeperDiff.diff(
+                List.of(read, write),
+                List.of(expected)
         );
+        assertEquals(List.of(expected), diff.create());
+        assertEquals(Set.of(read, write), Set.copyOf(diff.delete()));
+    }
+
+    @Test
+    void replacesLegacyServiceAccountPermissionWithUserType()
+    {
+        ActualArtifactKeeperPermission legacy = new ActualArtifactKeeperPermission(
+                "permission-1",
+                "repository-a",
+                "service_account",
+                "svc-build",
+                Set.of("read")
+        );
+        ArtifactKeeperPermission desired = new ArtifactKeeperPermission(
+                "repository-a",
+                "user",
+                "svc-build",
+                Set.of("read")
+        );
+
+        var diff = ArtifactKeeperDiff.diff(
+                List.of(legacy),
+                List.of(desired)
+        );
+        assertEquals(List.of(desired), diff.create());
+        assertEquals(List.of(legacy), diff.delete());
     }
 
     private static ArtifactKeeperPermission permission(
@@ -177,7 +188,7 @@ class ArtifactKeeperDiffTest {
     ) {
         return new ArtifactKeeperPermission(
                 "repository-a",
-                username.startsWith("svc-") ? "service_account" : "user",
+                "user",
                 username,
                 Set.of(actions)
         );
@@ -190,7 +201,7 @@ class ArtifactKeeperDiffTest {
         return new ActualArtifactKeeperPermission(
                 "permission-1",
                 "repository-a",
-                username.startsWith("svc-") ? "service_account" : "user",
+                "user",
                 username,
                 Set.of(actions)
         );

@@ -25,7 +25,7 @@
     <modules>
         <module>pact-api</module>
         <module>pact-core</module>
-        <module>pact-artifactkeeper</module>
+        <module>pact-artifact-keeper</module>
         <module>pact-filesystem</module>
         <module>pact-app</module>
         <module>pact-kubernetes</module>

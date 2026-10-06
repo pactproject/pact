@@ -90,7 +90,7 @@ provide them through the deployment's secret/configuration mechanism.
 | `pact-filesystem` | Reads a YAML snapshot as desired state |
 | `pact-kubernetes` | Watches `DataAccess` custom resources and reconciles their combined state |
 | `pact-ranger` | Compiles access into managed policies for a configured Apache Ranger service |
-| `pact-artifactkeeper` | Reconciles Artifact Keeper repository permissions ([current scope and roadmap](pact-artifactkeeper/README.md)) |
+| `pact-artifact-keeper` | Reconciles Artifact Keeper repository permissions ([current scope and roadmap](pact-artifact-keeper/README.md)) |
 | `pact-postgresql` | Reconciles PostgreSQL object privileges and declared role identities |
 | `pact-elasticsearch` | Reconciles Elasticsearch 9 native users' index privileges through PACT-owned roles |
 
