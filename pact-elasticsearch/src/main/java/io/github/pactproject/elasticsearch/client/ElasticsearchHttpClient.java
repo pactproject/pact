@@ -2,6 +2,7 @@ package io.github.pactproject.elasticsearch.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.pactproject.elasticsearch.ElasticsearchConfig;
 import io.github.pactproject.elasticsearch.api.ElasticsearchClient;
 import io.github.pactproject.elasticsearch.api.ElasticsearchClientException;
@@ -71,6 +72,18 @@ public final class ElasticsearchHttpClient implements ElasticsearchClient {
     public void putUser(String username, JsonNode definition)
             throws ElasticsearchClientException {
         send("PUT", "/_security/user/" + segment(username), definition);
+    }
+
+    @Override
+    public void updatePassword(String username, String password)
+            throws ElasticsearchClientException {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("password", password);
+        send(
+                "POST",
+                "/_security/user/" + segment(username) + "/_password",
+                body
+        );
     }
 
     private JsonNode get(String path, String name)

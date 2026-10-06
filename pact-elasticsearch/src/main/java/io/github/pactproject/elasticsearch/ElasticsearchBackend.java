@@ -21,6 +21,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -65,7 +66,10 @@ public final class ElasticsearchBackend implements Backend {
     ) throws BackendException {
         Map<String, ElasticsearchRole> previous = compile(previousState);
         Map<String, ElasticsearchRole> desired = compile(desiredState);
-        Map<String, Boolean> ensure = ensurePrincipals(desiredState);
+        Map<String, Identity> previousIdentities =
+                identitiesByPrincipal(previousState);
+        Map<String, Identity> desiredIdentities =
+                identitiesByPrincipal(desiredState);
         Set<String> principals = new TreeSet<>(previous.keySet());
         principals.addAll(desired.keySet());
         Map<String, JsonNode> roleSnapshot = new HashMap<>();
@@ -85,7 +89,8 @@ public final class ElasticsearchBackend implements Backend {
                 if (desired.containsKey(principal)
                         && userSnapshot.get(principal) == null
                         && (!config.principalMode().equals("ensure")
-                        || !ensure.getOrDefault(principal, false))) {
+                        || desiredIdentities.get(principal) == null
+                        || !desiredIdentities.get(principal).ensure())) {
                     throw new ValidationException(
                             "Elasticsearch native user does not exist: "
                                     + principal
@@ -119,7 +124,9 @@ public final class ElasticsearchBackend implements Backend {
                                     principal,
                                     newUser(
                                             desired.get(principal).name(),
-                                            generatedPassword()
+                                            passwordForCreation(
+                                                    desiredIdentities.get(principal)
+                                            )
                                     )
                             );
                             createdDuringApply.add(principal);
@@ -153,6 +160,21 @@ public final class ElasticsearchBackend implements Backend {
                                 requireOwned(currentRole, principal);
                                 client.deleteRole(role);
                             }
+                        }
+                    }
+                    for (String principal : desired.keySet()) {
+                        Identity identity = desiredIdentities.get(principal);
+                        if (identity != null
+                                && identity.password() != null
+                                && userSnapshot.get(principal) != null
+                                && passwordChanged(
+                                        previousIdentities.get(principal),
+                                        identity
+                                )) {
+                            client.updatePassword(
+                                    principal,
+                                    identity.password().reveal()
+                            );
                         }
                     }
                 }
@@ -246,14 +268,41 @@ public final class ElasticsearchBackend implements Backend {
         }
     }
 
-    private Map<String, Boolean> ensurePrincipals(PactState state) {
-        Map<String, Boolean> result = new HashMap<>();
+    private Map<String, Identity> identitiesByPrincipal(PactState state)
+            throws ValidationException {
+        Map<String, Identity> result = new HashMap<>();
         for (Identity identity : state.identities()) {
-            if (identity.backendId().equals(id)) {
-                result.put(identity.principal(), identity.ensure());
+            if (!identity.backendId().equals(id)) {
+                throw new ValidationException(
+                        "Identity backend '" + identity.backendId()
+                                + "' does not match Elasticsearch backend '"
+                                + id + "'"
+                );
             }
+            result.put(identity.principal(), identity);
         }
         return result;
+    }
+
+    private static String passwordForCreation(Identity identity) {
+        return identity != null && identity.password() != null
+                ? identity.password().reveal()
+                : generatedPassword();
+    }
+
+    private static boolean passwordChanged(
+            Identity previous,
+            Identity desired)
+    {
+        return previous == null
+                || !Objects.equals(
+                        previous.passwordSource(),
+                        desired.passwordSource()
+                )
+                || !Objects.equals(
+                        previous.passwordVersion(),
+                        desired.passwordVersion()
+                );
     }
 
     private ObjectNode roleDefinition(ElasticsearchRole role) {

@@ -7,12 +7,14 @@ import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
-import io.github.pactproject.api.exception.StateProviderException;
+import io.github.pactproject.api.exception.BackendOperationException;
 import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
+import io.github.pactproject.api.exception.StateProviderException;
 import io.github.pactproject.api.exception.StateReconciliationException;
 import io.github.pactproject.api.StateReconciler;
 import io.github.pactproject.kubernetes.compile.DataAccessCompiler;
+import io.github.pactproject.kubernetes.config.KubernetesConfig;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -282,45 +284,44 @@ class KubernetesStateProviderTest
     }
 
     @Test
-    void secretChangesApplyOnlyAfterDataAccessGenerationChanges()
+    void secretChangesTriggerReconciliationDuringInformerResync()
             throws Exception
     {
         var reconciler = new RecordingReconciler();
-        var provider = new KubernetesStateProvider(kubernetesClient);
+        var provider = new KubernetesStateProvider(
+                kubernetesClient,
+                new KubernetesConfig(
+                        "com.example.ru",
+                        "v1",
+                        "dataaccesses",
+                        100L,
+                        10L,
+                        List.of(10L)
+                )
+        );
         createSecret("default", "app-credentials", "password", "first");
         provider.start(reconciler);
         createDataAccess("default", "identity", identitySpec(false));
-        awaitDataAccess(
+        GenericKubernetesResource initial = awaitDataAccess(
                 "default",
                 "identity",
                 resource -> statusPhase(resource).equals("Ready")
         );
         awaitAppliedStateCount(reconciler, 1);
 
-        replaceSecret("default", "app-credentials", "password", "rotated");
-        Thread.sleep(300L);
-        assertEquals(1, reconciler.appliedStates.size());
-
-        GenericKubernetesResource resource =
-                kubernetesClient.genericKubernetesResources(DATA_ACCESS)
-                        .inNamespace("default")
-                        .withName("identity")
-                        .get();
-        resource.setAdditionalProperty("spec", identitySpec(true));
-        resource.getMetadata().setGeneration(
-                resource.getMetadata().getGeneration() + 1
+        String rotatedVersion = replaceSecret(
+                "default",
+                "app-credentials",
+                "password",
+                "rotated"
         );
-        kubernetesClient.genericKubernetesResources(DATA_ACCESS)
-                .inNamespace("default")
-                .resource(resource)
-                .update();
 
         GenericKubernetesResource applied = awaitDataAccess(
                 "default",
                 "identity",
                 candidate -> statusPhase(candidate).equals("Ready")
-                        && statusNumber(candidate, "observedGeneration")
-                        == resource.getMetadata().getGeneration()
+                        && lastIdentitySecretVersion(candidate)
+                        .equals(rotatedVersion)
         );
         awaitAppliedStateCount(reconciler, 2);
         Identity identity = reconciler.appliedStates.getLast()
@@ -328,7 +329,48 @@ class KubernetesStateProviderTest
                 .iterator()
                 .next();
         assertEquals("rotated", identity.password().reveal());
+        assertEquals(rotatedVersion, identity.passwordVersion());
+        assertEquals(
+                initial.getMetadata().getGeneration(),
+                applied.getMetadata().getGeneration()
+        );
         assertTrue(!status(applied).toString().contains("rotated"));
+
+        kubernetesClient.secrets()
+                .inNamespace("default")
+                .withName("app-credentials")
+                .delete();
+        GenericKubernetesResource secretMissing = awaitDataAccess(
+                "default",
+                "identity",
+                candidate -> statusPhase(candidate).equals("Error")
+        );
+        assertTrue(status(secretMissing).get("lastError").toString()
+                .contains("does not exist"));
+        assertEquals(2, reconciler.appliedStates.size());
+
+        String restoredVersion = createSecret(
+                "default",
+                "app-credentials",
+                "password",
+                "restored"
+        );
+        awaitDataAccess(
+                "default",
+                "identity",
+                candidate -> statusPhase(candidate).equals("Ready")
+                        && lastIdentitySecretVersion(candidate)
+                        .equals(restoredVersion)
+        );
+        awaitAppliedStateCount(reconciler, 3);
+        assertEquals(
+                "restored",
+                reconciler.appliedStates.getLast().identities()
+                        .iterator()
+                        .next()
+                        .password()
+                        .reveal()
+        );
         provider.close();
     }
 
@@ -446,6 +488,37 @@ class KubernetesStateProviderTest
     }
 
     @Test
+    void preservesNestedBackendFailureDetailsInStatus()
+            throws Exception
+    {
+        var reconciler = new RecordingReconciler();
+        reconciler.failure = new StateReconciliationException(
+                "reconciliation failed",
+                new BackendOperationException("backend rejected policy")
+        );
+        var provider = new KubernetesStateProvider(kubernetesClient);
+        provider.start(reconciler);
+        createDataAccess(
+                "default",
+                "backend-failure",
+                registrySpec("alice", "read")
+        );
+
+        GenericKubernetesResource failed = awaitDataAccess(
+                "default",
+                "backend-failure",
+                resource -> statusPhase(resource).equals("Error")
+        );
+        String lastError = status(failed).get("lastError").toString();
+        assertTrue(lastError.contains("StateReconciliationException"));
+        assertTrue(lastError.contains("reconciliation failed"));
+        assertTrue(lastError.contains("BackendOperationException"));
+        assertTrue(lastError.contains("backend rejected policy"));
+        assertTrue(reconciler.appliedStates.isEmpty());
+        provider.close();
+    }
+
+    @Test
     void cleansUpOnDeleteEvent()
             throws Exception
     {
@@ -472,6 +545,7 @@ class KubernetesStateProviderTest
                 reconciler.appliedStates.getLast()
         );
         provider.close();
+        assertEquals(2, reconciler.appliedStates.size());
     }
 
     @Test
@@ -566,7 +640,7 @@ class KubernetesStateProviderTest
         return created.getMetadata().getResourceVersion();
     }
 
-    private void replaceSecret(
+    private String replaceSecret(
             String namespace,
             String name,
             String key,
@@ -586,6 +660,12 @@ class KubernetesStateProviderTest
                 .inNamespace(namespace)
                 .resource(secret)
                 .update();
+        return kubernetesClient.secrets()
+                .inNamespace(namespace)
+                .withName(name)
+                .get()
+                .getMetadata()
+                .getResourceVersion();
     }
 
     private GenericKubernetesResource dataAccess(
@@ -767,10 +847,23 @@ class KubernetesStateProviderTest
         return value instanceof Number number ? number.longValue() : -1L;
     }
 
+    private String lastIdentitySecretVersion(
+            GenericKubernetesResource resource)
+    {
+        Object value = status(resource).get("lastAppliedIdentityVersions");
+        if (!(value instanceof List<?> versions) || versions.isEmpty()
+                || !(versions.getLast() instanceof Map<?, ?> version)) {
+            return "";
+        }
+        Object resourceVersion = version.get("resourceVersion");
+        return resourceVersion instanceof String string ? string : "";
+    }
+
     private static final class RecordingReconciler
             implements StateReconciler
     {
         private volatile PactState restoredState;
+        private volatile StateReconciliationException failure;
         private final List<PactState> appliedStates =
                 new CopyOnWriteArrayList<>();
 
@@ -784,6 +877,9 @@ class KubernetesStateProviderTest
         public void apply(PactState desiredState)
                 throws StateReconciliationException
         {
+            if (failure != null) {
+                throw failure;
+            }
             appliedStates.add(desiredState);
         }
     }

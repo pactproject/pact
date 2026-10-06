@@ -57,10 +57,13 @@ creation is explicitly enabled. `passwordSecretRef` is optional. Existing
 roles must have `LOGIN` when PACT is asked to set a password; PACT does not
 change existing role attributes. PACT does not delete roles when an identity
 declaration is removed. Each backend/principal identity must be declared by
-only one `DataAccess` resource. Secret changes alone do not trigger
-reconciliation; a later generation change to the declaring `DataAccess` loads
-and applies the current Secret value. Passwords are not written to
-`DataAccess` status or applied-state snapshots.
+only one `DataAccess` resource. During informer resync, PACT checks the
+resource version of each referenced Secret; a changed version triggers
+reconciliation without requiring a `DataAccess` generation change. The
+default resync interval is five seconds, so rotation is applied on the next
+resync. A missing or invalid Secret reports an error and is retried by a later
+resync. Passwords are not written to `DataAccess` status or applied-state
+snapshots.
 
 ### Target lists
 
@@ -101,6 +104,8 @@ resources:
   preserving the last successful `lastAppliedSpec`.
 - The controller adds `<group>/data-access` before applying a resource.
   During deletion, it removes that finalizer only after successful cleanup.
+  A repeated delete callback after the resource's applied snapshot has already
+  been removed is treated as a no-op.
 - Shutdown stops accepting events, lets queued reconciliation work finish,
   stops the informer, and closes the Kubernetes client.
 

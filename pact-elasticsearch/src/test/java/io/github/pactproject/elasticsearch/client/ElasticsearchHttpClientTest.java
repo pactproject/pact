@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ElasticsearchHttpClientTest {
     @Test
@@ -84,6 +85,51 @@ class ElasticsearchHttpClientTest {
             ElasticsearchHttpClient client =
                     new ElasticsearchHttpClient(config);
             assertNull(client.getRole("missing"));
+        }
+        finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void updatesPasswordThroughSecurityApi() throws Exception {
+        AtomicReference<String> observedMethod = new AtomicReference<>();
+        AtomicReference<String> observedPath = new AtomicReference<>();
+        AtomicReference<String> observedBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0
+        );
+        server.createContext("/_security/user", exchange -> {
+            observedMethod.set(exchange.getRequestMethod());
+            observedPath.set(exchange.getRequestURI().getRawPath());
+            observedBody.set(new String(
+                    exchange.getRequestBody().readAllBytes(),
+                    StandardCharsets.UTF_8
+            ));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            ElasticsearchHttpClient client = new ElasticsearchHttpClient(
+                    new ElasticsearchConfig(
+                            URI.create("http://127.0.0.1:"
+                                    + server.getAddress().getPort()),
+                            "pact",
+                            "secret",
+                            null,
+                            "require"
+                    )
+            );
+            client.updatePassword("alice x", "new-secret");
+
+            assertEquals("POST", observedMethod.get());
+            assertEquals(
+                    "/_security/user/alice%20x/_password",
+                    observedPath.get()
+            );
+            assertTrue(observedBody.get().contains("\"password\""));
+            assertTrue(observedBody.get().contains("\"new-secret\""));
         }
         finally {
             server.stop(0);

@@ -14,4 +14,7 @@ public interface ElasticsearchClient {
 
     void putUser(String username, JsonNode definition)
             throws ElasticsearchClientException;
+
+    void updatePassword(String username, String password)
+            throws ElasticsearchClientException;
 }

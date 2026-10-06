@@ -182,9 +182,13 @@ Rules:
   does not drop the role.
 - An optional Kubernetes `passwordSecretRef` sets the role password. PACT
   applies a changed Secret resource version on the next reconciliation of the
-  declaring `DataAccess`; it does not watch Secrets. Password changes are not
-  rolled back if a later grant operation fails. PACT reports the failure and
-  applies the declarative state on retry.
+  declaring `DataAccess`; it does not watch Secrets directly. Identity
+  reconciliation, including role creation and password updates, runs before
+  grant synchronization so grants can target newly ensured roles. PostgreSQL
+  does not expose the previous password to PACT, so a successful password
+  change cannot be rolled back if grant synchronization or a later backend
+  transaction fails. PACT reports the failure and applies the declarative
+  state on retry.
 - Role password management is separate from the JDBC credentials PACT uses
   for its own connection to PostgreSQL.
 - `Resource.backendId` selects the configured PostgreSQL connection.

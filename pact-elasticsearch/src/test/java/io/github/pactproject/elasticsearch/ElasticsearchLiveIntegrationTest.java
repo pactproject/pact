@@ -5,6 +5,7 @@ import io.github.pactproject.api.Access;
 import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.Resource;
+import io.github.pactproject.api.SecretValue;
 import io.github.pactproject.api.value.Value;
 import io.github.pactproject.elasticsearch.client.ElasticsearchHttpClient;
 import io.github.pactproject.elasticsearch.compile.ElasticsearchRoleCompiler;
@@ -34,6 +35,8 @@ class ElasticsearchLiveIntegrationTest {
         String suffix = UUID.randomUUID().toString().replace("-", "");
         String principal = "pact-it-" + suffix;
         String indexPattern = "pact-it-" + suffix + "-*";
+        String initialPassword = "Pact-it-" + suffix + "-Aa1!";
+        String rotatedPassword = "Rotated-" + suffix + "-Bb2!";
         ElasticsearchConfig config = new ElasticsearchConfig(
                 URI.create(endpoint),
                 username,
@@ -63,9 +66,9 @@ class ElasticsearchLiveIntegrationTest {
                         "elasticsearch-it",
                         principal,
                         true,
-                        null,
-                        null,
-                        null
+                        "integration/password",
+                        "1",
+                        new SecretValue(initialPassword)
                 ))
         );
         String ownedRole = ElasticsearchRoleCompiler.roleName(
@@ -94,6 +97,31 @@ class ElasticsearchLiveIntegrationTest {
                     role.path("indices").get(0).path("names").get(0).asText()
             );
             assertTrue(user.path("roles").toString().contains(ownedRole));
+            assertEquals(
+                    200,
+                    authenticate(endpoint, principal, initialPassword)
+            );
+
+            PactState rotated = new PactState(
+                    desired.accesses(),
+                    Set.of(new Identity(
+                            "elasticsearch-it",
+                            principal,
+                            true,
+                            "integration/password",
+                            "2",
+                            new SecretValue(rotatedPassword)
+                    ))
+            );
+            backend.prepare(desired, rotated).apply();
+            assertEquals(
+                    401,
+                    authenticate(endpoint, principal, initialPassword)
+            );
+            assertEquals(
+                    200,
+                    authenticate(endpoint, principal, rotatedPassword)
+            );
         }
         finally {
             try {
@@ -145,6 +173,28 @@ class ElasticsearchLiveIntegrationTest {
         assertTrue(response.statusCode() == 200
                         || response.statusCode() == 404,
                 "Test-only cleanup failed with HTTP " + response.statusCode());
+    }
+
+    private static int authenticate(
+            String endpoint,
+            String username,
+            String password)
+            throws Exception {
+        String token = java.util.Base64.getEncoder().encodeToString(
+                (username + ":" + password).getBytes(StandardCharsets.UTF_8)
+        );
+        String base = endpoint.endsWith("/")
+                ? endpoint.substring(0, endpoint.length() - 1)
+                : endpoint;
+        return HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(
+                                URI.create(base + "/_security/_authenticate")
+                        )
+                        .header("Authorization", "Basic " + token)
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString()
+        ).statusCode();
     }
 
     private static String required(String name) {

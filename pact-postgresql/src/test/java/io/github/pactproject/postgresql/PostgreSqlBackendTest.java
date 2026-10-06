@@ -15,7 +15,9 @@ import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.Privilege;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -96,7 +98,7 @@ class PostgreSqlBackendTest {
     }
 
     @Test
-    void reconcilesIdentityOnlyStateBeforeAnyGrantWork() throws Exception {
+    void reconcilesIdentityOnlyStateWithoutGrantWork() throws Exception {
         FakeClient client = new FakeClient();
         PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
         Identity identity = new Identity(
@@ -115,6 +117,30 @@ class PostgreSqlBackendTest {
 
         assertEquals(Set.of(identity), client.desiredIdentities);
         assertEquals(Set.of(), client.actual);
+    }
+
+    @Test
+    void reconcilesIdentitiesBeforeGrantSynchronization() throws Exception {
+        FakeClient client = new FakeClient();
+        PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
+        Identity identity = new Identity(
+                "postgres",
+                "alice",
+                true,
+                "default/credentials#password",
+                "2",
+                new io.github.pactproject.api.SecretValue("rotated")
+        );
+
+        backend.prepare(
+                PactState.empty(),
+                new PactState(
+                        state("alice", "analytics", "CONNECT").accesses(),
+                        Set.of(identity)
+                )
+        ).apply();
+
+        assertEquals(List.of("identities", "grants"), client.operations);
     }
 
     @Test
@@ -173,6 +199,7 @@ class PostgreSqlBackendTest {
     private static final class FakeClient implements PostgreSqlClient {
         private final Set<Grant> actual = new HashSet<>();
         private Set<Identity> desiredIdentities = Set.of();
+        private final List<String> operations = new ArrayList<>();
         private boolean failOnRead;
         private int identityReconciliationCount;
 
@@ -192,6 +219,7 @@ class PostgreSqlBackendTest {
                 Set<Identity> previous,
                 Set<Identity> desired
         ) {
+            operations.add("identities");
             identityReconciliationCount++;
             desiredIdentities = Set.copyOf(desired);
         }
@@ -201,6 +229,7 @@ class PostgreSqlBackendTest {
                 Set<String> databases,
                 Set<Grant> desired
         ) {
+            operations.add("grants");
             actual.removeIf(grant -> databases.contains(grant.target().database()));
             actual.addAll(desired);
         }

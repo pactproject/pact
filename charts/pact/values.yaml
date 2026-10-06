@@ -56,6 +56,7 @@ extraEnv: []
 #         name: postgres-credentials
 #         key: password
 
+nodeSelector: {}
 podAnnotations: {}
 podLabels: {}
 podSecurityContext:

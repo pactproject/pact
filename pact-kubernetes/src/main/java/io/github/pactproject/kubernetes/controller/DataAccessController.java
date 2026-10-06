@@ -23,17 +23,21 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -310,6 +314,10 @@ public final class DataAccessController
                 return;
             }
             if (generation == generation(oldResource)) {
+                if (isInformerResync(oldResource, resource)
+                        && hasPasswordSecretVersionChanged(resource, key)) {
+                    enqueue(new DataAccessEvent(EventType.APPLY, resource, key));
+                }
                 return;
             }
             if (observedGeneration != null
@@ -321,6 +329,20 @@ public final class DataAccessController
         catch (RuntimeException e) {
             log.error("Ignoring invalid DataAccess update event: {}", e.getMessage(), e);
         }
+    }
+
+    private boolean isInformerResync(
+            GenericKubernetesResource oldResource,
+            GenericKubernetesResource newResource)
+    {
+        String oldVersion = oldResource.getMetadata() == null
+                ? null
+                : oldResource.getMetadata().getResourceVersion();
+        return oldVersion != null
+                && java.util.Objects.equals(
+                        oldVersion,
+                        newResource.getMetadata().getResourceVersion()
+                );
     }
 
     private void handleDelete(GenericKubernetesResource resource)
@@ -336,6 +358,45 @@ public final class DataAccessController
         }
         catch (RuntimeException e) {
             log.error("Ignoring invalid DataAccess delete event: {}", e.getMessage(), e);
+        }
+    }
+
+    private boolean hasPasswordSecretVersionChanged(
+            GenericKubernetesResource resource,
+            ResourceKey key)
+    {
+        Map<String, ?> spec = requiredObject(
+                resource.getAdditionalProperties().get("spec"),
+                "spec"
+        );
+        PactState declared;
+        try {
+            declared = compiler.compile(List.of(spec));
+        }
+        catch (IllegalArgumentException invalidSpec) {
+            return false;
+        }
+        if (declared.identities().stream().noneMatch(
+                identity -> identity.passwordSource() != null
+        )) {
+            return false;
+        }
+
+        Map<String, ?> currentStatus = optionalObject(
+                resource.getAdditionalProperties().get("status"),
+                "status"
+        );
+        PactState lastApplied = restoreIdentityVersions(
+                declared,
+                currentStatus.get("lastAppliedIdentityVersions"),
+                key.namespace()
+        );
+        try {
+            PactState current = resolveCredentials(declared, key.namespace());
+            return !lastApplied.identities().equals(current.identities());
+        }
+        catch (IllegalArgumentException unresolvedSecret) {
+            return true;
         }
     }
 
@@ -433,7 +494,13 @@ public final class DataAccessController
         catch (IllegalArgumentException e) {
             patchStatus(
                     event.key(),
-                    status("Error", e.getMessage(), generation, null, false)
+                    status(
+                            "Error",
+                            failureDetails(e),
+                            generation,
+                            null,
+                            false
+                    )
             );
         }
         catch (StateReconciliationException e) {
@@ -445,13 +512,58 @@ public final class DataAccessController
             );
             patchStatus(
                     event.key(),
-                    status("Error", e.getMessage(), generation, null, false)
+                    status(
+                            "Error",
+                            failureDetails(e),
+                            generation,
+                            null,
+                            false
+                    )
             );
         }
     }
 
+    private String failureDetails(Throwable failure)
+    {
+        StringJoiner details = new StringJoiner(" | ");
+        Set<Throwable> visited = Collections.newSetFromMap(
+                new IdentityHashMap<>()
+        );
+        ArrayDeque<Throwable> pending = new ArrayDeque<>();
+        pending.add(failure);
+        while (!pending.isEmpty()) {
+            Throwable current = pending.removeFirst();
+            if (!visited.add(current)) {
+                continue;
+            }
+            String message = current.getMessage();
+            details.add(current.getClass().getSimpleName()
+                    + (message == null || message.isBlank()
+                    ? ""
+                    : ": " + message));
+            if (current.getCause() != null) {
+                pending.addLast(current.getCause());
+            }
+            for (Throwable suppressed : current.getSuppressed()) {
+                pending.addLast(suppressed);
+            }
+        }
+        return details.toString();
+    }
+
     private void reconcileDelete(DataAccessEvent event)
     {
+        if (!appliedResources.containsKey(event.key())) {
+            log.debug(
+                    "Skipping DataAccess delete for {}/{} because its "
+                            + "applied state is already absent",
+                    event.key().namespace(),
+                    event.key().name()
+            );
+            removeFinalizer(event.key());
+            return;
+        }
+
         long generation = generation(event.resource());
         patchStatus(
                 event.key(),
@@ -475,7 +587,13 @@ public final class DataAccessController
             );
             patchStatus(
                     event.key(),
-                    status("Error", e.getMessage(), generation, null, false)
+                    status(
+                            "Error",
+                            failureDetails(e),
+                            generation,
+                            null,
+                            false
+                    )
             );
             return;
         }
@@ -492,7 +610,13 @@ public final class DataAccessController
             );
             patchStatus(
                     event.key(),
-                    status("Error", e.getMessage(), generation, null, false)
+                    status(
+                            "Error",
+                            failureDetails(e),
+                            generation,
+                            null,
+                            false
+                    )
             );
         }
     }

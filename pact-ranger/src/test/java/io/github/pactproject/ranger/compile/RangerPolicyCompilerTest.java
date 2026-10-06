@@ -260,6 +260,88 @@ class RangerPolicyCompilerTest {
     }
 
     @Test
+    void recognizesSelectGrantsAtDirectAncestorAndWildcardTargets()
+            throws Exception {
+        RangerServiceDefinition definition = definition("""
+                {
+                  "name":"analytics",
+                  "resources":[
+                    {"name":"catalog"},
+                    {"name":"schema","parent":"catalog"},
+                    {"name":"table","parent":"schema"},
+                    {"name":"column","parent":"table"}
+                  ],
+                  "accessTypes":[{"name":"select"}]
+                }
+                """);
+        Resource column = new Resource(
+                "analytics",
+                Map.of(
+                        "catalog", "lake",
+                        "schema", "sales",
+                        "table", "orders",
+                        "column", "email"
+                )
+        );
+        Access transformation = new Access("alice", column, Map.of());
+        Access directSelect = selectAccess(
+                Map.of(
+                        "catalog", "lake",
+                        "schema", "sales",
+                        "table", "orders",
+                        "column", "email"
+                ),
+                "column"
+        );
+        Access tableSelect = selectAccess(
+                Map.of(
+                        "catalog", "lake",
+                        "schema", "sales",
+                        "table", "orders"
+                ),
+                "table"
+        );
+        Access wildcardSelect = selectAccess(
+                Map.of(
+                        "catalog", "lake",
+                        "schema", "sales",
+                        "table", "*"
+                ),
+                "table"
+        );
+        Access unrelatedSelect = selectAccess(
+                Map.of(
+                        "catalog", "lake",
+                        "schema", "sales",
+                        "table", "customers"
+                ),
+                "table"
+        );
+
+        for (Access select : List.of(
+                directSelect,
+                tableSelect,
+                wildcardSelect
+        )) {
+            assertTrue(RangerPolicyCompiler.missingSelectUsers(
+                    transformation,
+                    new PactState(Set.of(transformation, select)),
+                    definition,
+                    Set.of("column")
+            ).isEmpty());
+        }
+        assertEquals(
+                Set.of("alice"),
+                RangerPolicyCompiler.missingSelectUsers(
+                        transformation,
+                        new PactState(Set.of(transformation, unrelatedSelect)),
+                        definition,
+                        Set.of("column")
+                )
+        );
+    }
+
+    @Test
     void mergesUsersAndIgnoresOrderOfAccessCollections() throws Exception {
         RangerServiceDefinition definition = definition("""
                 {
@@ -314,6 +396,20 @@ class RangerPolicyCompilerTest {
                 java.util.Arrays.stream(values)
                         .map(Value::string)
                         .collect(java.util.stream.Collectors.toSet())
+        );
+    }
+
+    private static Access selectAccess(
+            Map<String, String> target,
+            String level
+    ) {
+        return new Access(
+                "alice",
+                new Resource("analytics", target),
+                Map.of("permissions", Value.object(Map.of(
+                        level,
+                        strings("select")
+                )))
         );
     }
 

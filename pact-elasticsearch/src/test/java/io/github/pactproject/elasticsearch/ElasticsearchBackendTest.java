@@ -7,6 +7,7 @@ import io.github.pactproject.api.Access;
 import io.github.pactproject.api.Identity;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.Resource;
+import io.github.pactproject.api.SecretValue;
 import io.github.pactproject.api.exception.BackendOperationException;
 import io.github.pactproject.api.exception.ValidationException;
 import io.github.pactproject.api.value.Value;
@@ -70,6 +71,60 @@ class ElasticsearchBackendTest {
         backend.prepare(initial, PactState.empty()).apply();
         assertFalse(client.roles.containsKey(roleName("ensure-user")));
         assertNotNull(client.users.get("ensure-user"));
+    }
+
+    @Test
+    void createsUserWithSecretAndRotatesOnlyWhenSecretVersionChanges()
+            throws Exception {
+        FakeClient client = new FakeClient();
+        ElasticsearchBackend backend = backend(client, "ensure");
+        Identity oldIdentity = identity("1", "old-password");
+        PactState oldState = state(
+                oldIdentity,
+                access("alice", "logs-*", "read")
+        );
+        client.users.put("alice", user("alice"));
+
+        Identity rotatedIdentity = identity("2", "new-password");
+        PactState rotatedState = state(
+                rotatedIdentity,
+                access("alice", "logs-*", "read")
+        );
+        backend.prepare(oldState, rotatedState).apply();
+        assertEquals("new-password", client.passwordUpdates.get("alice"));
+
+        client.passwordUpdates.clear();
+        Identity sameVersion = identity("2", "not-applied");
+        backend.prepare(
+                rotatedState,
+                state(
+                        sameVersion,
+                        access("alice", "logs-*", "read")
+                )
+        ).apply();
+        assertFalse(client.passwordUpdates.containsKey("alice"));
+
+        FakeClient creationClient = new FakeClient();
+        ElasticsearchBackend creationBackend =
+                backend(creationClient, "ensure");
+        creationBackend.prepare(
+                PactState.empty(),
+                state(
+                        new Identity(
+                                "search",
+                                "new-user",
+                                true,
+                                "default/credentials#password",
+                                "1",
+                                new SecretValue("created-password")
+                        ),
+                        access("new-user", "logs-*", "read")
+                )
+        ).apply();
+        assertEquals(
+                "created-password",
+                creationClient.passwordsUsedOnCreate.get("new-user")
+        );
     }
 
     @Test
@@ -151,6 +206,27 @@ class ElasticsearchBackendTest {
         return new PactState(Set.of(accesses));
     }
 
+    private static PactState state(
+            Identity identity,
+            Access... accesses)
+    {
+        return new PactState(
+                Set.of(accesses),
+                Set.of(identity)
+        );
+    }
+
+    private static Identity identity(String version, String password) {
+        return new Identity(
+                "search",
+                "alice",
+                true,
+                "default/credentials#password",
+                version,
+                new SecretValue(password)
+        );
+    }
+
     private static Access access(
             String principal,
             String index,
@@ -183,6 +259,9 @@ class ElasticsearchBackendTest {
     private static final class FakeClient implements ElasticsearchClient {
         private final Map<String, JsonNode> roles = new HashMap<>();
         private final Map<String, JsonNode> users = new HashMap<>();
+        private final Map<String, String> passwordsUsedOnCreate =
+                new HashMap<>();
+        private final Map<String, String> passwordUpdates = new HashMap<>();
         private boolean failUserUpdate;
 
         @Override
@@ -215,8 +294,19 @@ class ElasticsearchBackendTest {
             }
             ObjectNode stored = definition.deepCopy();
             stored.put("username", username);
+            if (definition.hasNonNull("password")) {
+                passwordsUsedOnCreate.put(
+                        username,
+                        definition.path("password").asText()
+                );
+            }
             stored.remove("password");
             users.put(username, stored);
+        }
+
+        @Override
+        public void updatePassword(String username, String password) {
+            passwordUpdates.put(username, password);
         }
 
         private Set<String> rolesOf(String username) {

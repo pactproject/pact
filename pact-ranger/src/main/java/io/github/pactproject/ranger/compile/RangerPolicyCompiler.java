@@ -247,6 +247,7 @@ public final class RangerPolicyCompiler {
             warnIfMissingSelect(
                     access,
                     state,
+                    definition,
                     definition.leafResources(maskDefinition.resources()),
                     "dataMask"
             );
@@ -306,6 +307,7 @@ public final class RangerPolicyCompiler {
             warnIfMissingSelect(
                     access,
                     state,
+                    definition,
                     definition.leafResources(filterDefinition.resources()),
                     "rowFilter"
             );
@@ -671,30 +673,16 @@ public final class RangerPolicyCompiler {
     private static void warnIfMissingSelect(
             Access transformationAccess,
             PactState state,
+            RangerServiceDefinition definition,
             Set<String> resourceLevels,
             String transformation
     ) {
-        Set<String> missingUsers = new TreeSet<>();
-        for (String resourceLevel : resourceLevels) {
-            String user = transformationAccess.principal();
-            boolean hasSelect = state.accesses().stream()
-                    .filter(access ->
-                            access.principal().equals(user)
-                                    && access.resource().equals(
-                                    transformationAccess.resource()
-                            ))
-                    .map(access -> permissionMap(
-                            access.attributes().get("permissions")
-                    ))
-                    .map(permissions -> permissions.getOrDefault(
-                            resourceLevel,
-                            Set.of()
-                    ))
-                    .anyMatch(permissions -> permissions.contains("select"));
-            if (!hasSelect) {
-                missingUsers.add(user);
-            }
-        }
+        Set<String> missingUsers = missingSelectUsers(
+                transformationAccess,
+                state,
+                definition,
+                resourceLevels
+        );
         if (!missingUsers.isEmpty()) {
             LOGGER.warn(
                     "{} requires select permission for users {} at {}",
@@ -703,6 +691,72 @@ public final class RangerPolicyCompiler {
                     transformationAccess.resource().target()
             );
         }
+    }
+
+    static Set<String> missingSelectUsers(
+            Access transformationAccess,
+            PactState state,
+            RangerServiceDefinition definition,
+            Set<String> resourceLevels
+    ) {
+        Set<String> missingUsers = new TreeSet<>();
+        for (String resourceLevel : resourceLevels) {
+            String user = transformationAccess.principal();
+            boolean hasSelect = state.accesses().stream()
+                    .filter(access ->
+                            access.principal().equals(user)
+                                    && access.resource().backendId().equals(
+                                    transformationAccess.resource()
+                                            .backendId()
+                            ))
+                    .anyMatch(access -> grantsSelectFor(
+                            access,
+                            transformationAccess,
+                            resourceLevel,
+                            definition
+                    ));
+            if (!hasSelect) {
+                missingUsers.add(user);
+            }
+        }
+        return Set.copyOf(missingUsers);
+    }
+
+    private static boolean grantsSelectFor(
+            Access grant,
+            Access transformation,
+            String resourceLevel,
+            RangerServiceDefinition definition
+    ) {
+        Map<String, Set<String>> permissions = permissionMap(
+                grant.attributes().get("permissions")
+        );
+        Map<String, String> grantedTarget = grant.resource().target();
+        Map<String, String> requestedTarget =
+                transformation.resource().target();
+        for (String grantLevel
+                : definition.ancestorsInclusive(resourceLevel)) {
+            if (!permissions.getOrDefault(grantLevel, Set.of())
+                    .contains("select")) {
+                continue;
+            }
+            boolean covers = true;
+            for (String resource
+                    : definition.ancestorsInclusive(grantLevel)) {
+                String granted = grantedTarget.get(resource);
+                String requested = requestedTarget.get(resource);
+                if (granted == null || requested == null
+                        || (!"*".equals(granted)
+                        && !granted.equals(requested))) {
+                    covers = false;
+                    break;
+                }
+            }
+            if (covers) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static ObjectNode resourcesNode(Map<String, String> resources) {

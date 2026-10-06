@@ -26,12 +26,28 @@ The HTTP permission API is more generic than the current PACT model: permission
 requests contain `principal_type`, `principal_id`, `target_type`, `target_id`,
 and `actions`, all represented by generic strings/IDs in the API.
 
-## Upstream capabilities and model TODO
+## Artifact Keeper 1.5.1 compatibility
+
+The permission create/list JSON contract in PACT matches the tagged Artifact
+Keeper 1.5.1 server API: create uses `principal_type`, `principal_id`,
+`target_type`, `target_id`, and `actions`; list returns those fields under
+`items` and `pagination.total_pages`. The upstream request requires principal
+and target IDs to be UUIDs. PACT resolves names to IDs before creating
+permissions. A local HTTP contract test protects these field names and shapes.
+
+This confirms schema compatibility, not live behavior of every deployment.
+The opt-in integration test should be run against the actual deployed server
+version and with a token that has permission-write scope and administrator
+authorization. The checked server implementation is pinned at
+[Artifact Keeper 1.5.1 permissions handler](https://github.com/artifact-keeper/artifact-keeper/blob/25d498934aca6887cf27726bfa3e2c748dbdeb8e/backend/src/api/handlers/permissions.rs).
+
+## Upstream capabilities and model roadmap
 
 The following capabilities were verified in the upstream Artifact Keeper
-backend source checked on 2026-10-05. Availability and behavior must still be
-validated against the deployed Artifact Keeper version before adding PACT
-support:
+backend source checked on 2026-10-05. These authorization capabilities are
+distinct from the permission API JSON schema above; their availability and
+behavior must still be validated against the deployed Artifact Keeper version
+before adding PACT support:
 
 - **Repository scope** is used for content authorization.
 - **Project scope** exists, and project permissions can be inherited by
