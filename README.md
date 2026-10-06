@@ -157,6 +157,19 @@ providers and backends as plugins. Mount a PACT YAML configuration file at
 `/opt/pact/plugins`. Supply backend credentials through the deployment's
 secret mechanism rather than baking them into the image.
 
+GitHub Actions builds the image for pull requests and publishes it to GHCR
+when a version tag starting with `v` is pushed. For example, to publish and
+pull version `1.2.3`:
+
+```shell
+git tag v1.2.3
+git push origin v1.2.3
+docker pull ghcr.io/pactproject/pact:v1.2.3
+```
+
+GHCR package visibility is managed in GitHub; make the package public there if
+the image should be available without authentication.
+
 The Kubernetes state provider runs as a controller and watches `DataAccess`
 resources cluster-wide. It requires the corresponding CRD, status subresource,
 and RBAC; see [`pact-kubernetes/README.md`](pact-kubernetes/README.md) and the
