@@ -619,9 +619,8 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         }
     }
 
-    Set<Grant> actualGrants = authoritativeGrants(
-            loadAclGrants(connection, database)
-    );
+    Set<AclGrant> actualAcl = loadAclGrants(connection, database);
+    Set<Grant> actualGrants = authoritativeGrants(actualAcl, wanted);
     for (Grant grant : wanted) {
         if (!actualGrants.contains(grant)) {
             execute(connection, "GRANT", grant);
@@ -629,7 +628,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     }
 
     Set<AclGrant> finalAcl = loadAclGrants(connection, database);
-        Set<Grant> finalGrants = authoritativeGrants(finalAcl);
+        Set<Grant> finalGrants = authoritativeGrants(finalAcl, wanted);
         Set<Grant> missing = new HashSet<>(wanted);
         missing.removeAll(finalGrants);
     Set<Grant> stale = authoritativeManagedGrants(finalAcl);
@@ -659,11 +658,27 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         };
     }
 
-    private Set<Grant> authoritativeGrants(Set<AclGrant> aclGrants) {
+    private Set<Grant> authoritativeGrants(
+            Set<AclGrant> aclGrants,
+            Set<Grant> wanted
+    ) {
         Set<Grant> result = new HashSet<>();
         for (AclGrant acl : aclGrants) {
             if (!acl.granteeIsOwner()) {
                 result.add(acl.grant());
+            }
+        }
+        for (Grant grant : wanted) {
+            GrantTarget ownedTarget = grant.target().level() == GrantLevel.COLUMN
+                    ? grant.target().pathTo(GrantLevel.TABLE)
+                    : grant.target();
+            boolean granteeOwnsTarget = aclGrants.stream().anyMatch(acl ->
+                    acl.granteeIsOwner()
+                            && acl.grant().target().equals(ownedTarget)
+                            && acl.grant().role().equals(grant.role())
+            );
+            if (granteeOwnsTarget) {
+                result.add(grant);
             }
         }
         return result;

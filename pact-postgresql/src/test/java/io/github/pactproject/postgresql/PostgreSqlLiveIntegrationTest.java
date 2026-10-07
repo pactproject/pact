@@ -420,6 +420,798 @@ class PostgreSqlLiveIntegrationTest {
     }
 
     @Test
+    void authoritativeAdoptionPreservesExistingObjectsAndCanRollback()
+            throws Exception {
+        PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
+                "username", required("PACT_IT_POSTGRESQL_USERNAME"),
+                "password", required("PACT_IT_POSTGRESQL_PASSWORD")
+        ));
+        PostgreSqlConfig authoritativeConfig = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", adminConfig.jdbcUrl(),
+                "username", adminConfig.username(),
+                "password", adminConfig.password(),
+                "reconciliation-mode", "authoritative"
+        ));
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String database = "pact_it_adopt_" + suffix;
+        String owner = "pact_it_adopt_owner_" + suffix;
+        String oldGrantor = "pact_it_adopt_grantor_" + suffix;
+        String runtime = "pact_it_adopt_runtime_" + suffix;
+        String reporter = "pact_it_adopt_reporter_" + suffix;
+        String obsoleteRole = "pact_it_adopt_obsolete_" + suffix;
+        String salesSchema = "sales";
+        String reportingSchema = "reporting";
+        String ordersTable = "orders";
+        String reportTable = "daily";
+        JdbcPostgreSqlClient client =
+                new JdbcPostgreSqlClient(authoritativeConfig);
+        PostgreSqlBackend backend = new PostgreSqlBackend(BACKEND_ID, client);
+
+        try {
+            try (Connection connection = adminConnection(adminConfig);
+                 Statement statement = connection.createStatement()) {
+                for (String role : Set.of(
+                        owner, oldGrantor, runtime, reporter, obsoleteRole
+                )) {
+                    statement.execute(
+                            "CREATE ROLE " + quoteIdentifier(role) + " NOLOGIN"
+                    );
+                }
+                statement.execute(
+                        "CREATE DATABASE " + quoteIdentifier(database)
+                                + " OWNER " + quoteIdentifier(owner)
+                );
+            }
+
+            try (Connection connection = databaseConnection(
+                    adminConfig,
+                    database,
+                    adminConfig.username(),
+                    adminConfig.password()
+            ); Statement statement = connection.createStatement()) {
+                statement.execute("SET ROLE " + quoteIdentifier(owner));
+                statement.execute(
+                        "CREATE SCHEMA " + quoteIdentifier(salesSchema)
+                );
+                statement.execute(
+                        "CREATE TABLE " + quoteIdentifier(salesSchema) + "."
+                                + quoteIdentifier(ordersTable)
+                                + " (id integer PRIMARY KEY, note text)"
+                );
+                statement.execute(
+                        "INSERT INTO " + quoteIdentifier(salesSchema) + "."
+                                + quoteIdentifier(ordersTable)
+                                + " VALUES (1, 'kept data')"
+                );
+                statement.execute(
+                        "CREATE SCHEMA " + quoteIdentifier(reportingSchema)
+                );
+                statement.execute(
+                        "CREATE TABLE " + quoteIdentifier(reportingSchema) + "."
+                                + quoteIdentifier(reportTable) + " (day date)"
+                );
+                statement.execute(
+                        "INSERT INTO " + quoteIdentifier(reportingSchema) + "."
+                                + quoteIdentifier(reportTable)
+                                + " VALUES (DATE '2026-10-01')"
+                );
+                statement.execute(
+                        "GRANT CONNECT ON DATABASE " + quoteIdentifier(database)
+                                + " TO " + quoteIdentifier(oldGrantor)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT USAGE ON SCHEMA " + quoteIdentifier(salesSchema)
+                                + " TO " + quoteIdentifier(oldGrantor)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT SELECT, UPDATE ON TABLE "
+                                + quoteIdentifier(salesSchema) + "."
+                                + quoteIdentifier(ordersTable) + " TO "
+                                + quoteIdentifier(oldGrantor)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT CONNECT ON DATABASE " + quoteIdentifier(database)
+                                + " TO " + quoteIdentifier(reporter)
+                );
+                statement.execute(
+                        "GRANT USAGE ON SCHEMA "
+                                + quoteIdentifier(reportingSchema)
+                                + " TO " + quoteIdentifier(reporter)
+                );
+                statement.execute(
+                        "GRANT SELECT ON TABLE "
+                                + quoteIdentifier(reportingSchema) + "."
+                                + quoteIdentifier(reportTable) + " TO "
+                                + quoteIdentifier(reporter)
+                );
+                statement.execute("RESET ROLE");
+
+                statement.execute("SET ROLE " + quoteIdentifier(oldGrantor));
+                statement.execute(
+                        "GRANT CONNECT ON DATABASE " + quoteIdentifier(database)
+                                + " TO " + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "GRANT USAGE ON SCHEMA " + quoteIdentifier(salesSchema)
+                                + " TO " + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "GRANT SELECT, UPDATE ON TABLE "
+                                + quoteIdentifier(salesSchema) + "."
+                                + quoteIdentifier(ordersTable) + " TO "
+                                + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "GRANT SELECT ON TABLE "
+                                + quoteIdentifier(salesSchema) + "."
+                                + quoteIdentifier(ordersTable) + " TO "
+                                + quoteIdentifier(obsoleteRole)
+                );
+                statement.execute("RESET ROLE");
+            }
+
+            PactState desired = new PactState(Set.of(
+                    permissionAccess(
+                            runtime,
+                            Map.of(
+                                    "database", database,
+                                    "schema", salesSchema,
+                                    "table", ordersTable
+                            ),
+                            Map.of(
+                                    "database", Set.of("CONNECT"),
+                                    "schema", Set.of("USAGE"),
+                                    "table", Set.of("SELECT")
+                            )
+                    ),
+                    permissionAccess(
+                            reporter,
+                            Map.of(
+                                    "database", database,
+                                    "schema", reportingSchema,
+                                    "table", reportTable
+                            ),
+                            Map.of(
+                                    "database", Set.of("CONNECT"),
+                                    "schema", Set.of("USAGE"),
+                                    "table", Set.of("SELECT")
+                            )
+                    )
+            ));
+            Set<Grant> existingGrants = client.getManagedGrants(Set.of(database));
+            assertTrue(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_table_privilege("
+                            + quoteLiteral(runtime) + ", "
+                            + quoteLiteral(salesSchema + "." + ordersTable)
+                            + ", 'UPDATE')"
+            ));
+
+            var transaction = backend.prepare(PactState.empty(), desired);
+            transaction.apply();
+            Set<Grant> expectedGrants = Set.of(
+                    grant(new GrantTarget(database, null, null, null),
+                            runtime, Privilege.CONNECT),
+                    grant(new GrantTarget(database, salesSchema, null, null),
+                            runtime, Privilege.USAGE),
+                    grant(new GrantTarget(database, salesSchema, ordersTable, null),
+                            runtime, Privilege.SELECT),
+                    grant(new GrantTarget(database, null, null, null),
+                            reporter, Privilege.CONNECT),
+                    grant(new GrantTarget(database, reportingSchema, null, null),
+                            reporter, Privilege.USAGE),
+                    grant(new GrantTarget(
+                            database, reportingSchema, reportTable, null
+                    ), reporter, Privilege.SELECT)
+            );
+            assertEquals(
+                    expectedGrants,
+                    client.getManagedGrants(Set.of(database))
+            );
+            assertTablePrivilege(
+                    adminConfig, database, runtime, salesSchema, ordersTable,
+                    "UPDATE", false
+            );
+            assertTablePrivilege(
+                    adminConfig, database, obsoleteRole, salesSchema, ordersTable,
+                    "SELECT", false
+            );
+            assertTablePrivilege(
+                    adminConfig, database, reporter, reportingSchema, reportTable,
+                    "SELECT", true
+            );
+            assertEquals(
+                    owner,
+                    tableOwner(adminConfig, database, salesSchema, ordersTable)
+            );
+            assertEquals(
+                    1,
+                    tableRowCount(adminConfig, database, salesSchema, ordersTable)
+            );
+            assertEquals(
+                    1,
+                    tableRowCount(
+                            adminConfig, database, reportingSchema, reportTable
+                    )
+            );
+
+            transaction.rollback();
+            assertEquals(
+                    existingGrants,
+                    client.getManagedGrants(Set.of(database))
+            );
+            assertTablePrivilege(
+                    adminConfig, database, runtime, salesSchema, ordersTable,
+                    "UPDATE", true
+            );
+            assertTablePrivilege(
+                    adminConfig, database, obsoleteRole, salesSchema, ordersTable,
+                    "SELECT", true
+            );
+            assertEquals(
+                    owner,
+                    tableOwner(adminConfig, database, salesSchema, ordersTable)
+            );
+            assertEquals(
+                    1,
+                    tableRowCount(adminConfig, database, salesSchema, ordersTable)
+            );
+        }
+        finally {
+            dropDatabaseAndRole(
+                    adminConfig,
+                    database,
+                    owner,
+                    oldGrantor,
+                    runtime,
+                    reporter,
+                    obsoleteRole
+            );
+        }
+    }
+
+    @Test
+    void grantorModeLeavesUnmanagedLegacyAclInOtherSchemaUntouched()
+            throws Exception {
+        PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
+                "username", required("PACT_IT_POSTGRESQL_USERNAME"),
+                "password", required("PACT_IT_POSTGRESQL_PASSWORD")
+        ));
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String database = "pact_it_shared_" + suffix;
+        String owner = "pact_it_shared_owner_" + suffix;
+        String grantManager = "pact_it_shared_manager_" + suffix;
+        String grantManagerPassword = "PactIt-" + suffix;
+        String runtime = "pact_it_shared_runtime_" + suffix;
+        String externalGrantor = "pact_it_shared_external_" + suffix;
+        String externalRole = "pact_it_shared_reader_" + suffix;
+        String managedSchema = "managed";
+        String externalSchema = "other_application";
+        String table = TABLE;
+        PostgreSqlBackend backend;
+        JdbcPostgreSqlClient client;
+
+        try {
+            try (Connection connection = adminConnection(adminConfig);
+                 Statement statement = connection.createStatement()) {
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(owner) + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(grantManager)
+                                + " LOGIN PASSWORD "
+                                + quoteLiteral(grantManagerPassword)
+                );
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(runtime) + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(externalGrantor)
+                                + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(externalRole) + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE DATABASE " + quoteIdentifier(database)
+                                + " OWNER " + quoteIdentifier(owner)
+                );
+            }
+
+            try (Connection connection = databaseConnection(
+                    adminConfig,
+                    database,
+                    adminConfig.username(),
+                    adminConfig.password()
+            ); Statement statement = connection.createStatement()) {
+                statement.execute("SET ROLE " + quoteIdentifier(owner));
+                statement.execute(
+                        "CREATE SCHEMA " + quoteIdentifier(managedSchema)
+                );
+                statement.execute(
+                        "CREATE TABLE " + quoteIdentifier(managedSchema) + "."
+                                + quoteIdentifier(table)
+                                + " (id integer PRIMARY KEY, note text)"
+                );
+                statement.execute(
+                        "INSERT INTO " + quoteIdentifier(managedSchema) + "."
+                                + quoteIdentifier(table)
+                                + " VALUES (1, 'managed data')"
+                );
+                statement.execute(
+                        "CREATE SCHEMA " + quoteIdentifier(externalSchema)
+                );
+                statement.execute(
+                        "CREATE TABLE " + quoteIdentifier(externalSchema) + "."
+                                + quoteIdentifier(table)
+                                + " (id integer PRIMARY KEY, note text)"
+                );
+                statement.execute(
+                        "INSERT INTO " + quoteIdentifier(externalSchema) + "."
+                                + quoteIdentifier(table)
+                                + " VALUES (1, 'external data')"
+                );
+                statement.execute(
+                        "GRANT CONNECT ON DATABASE " + quoteIdentifier(database)
+                                + " TO " + quoteIdentifier(grantManager)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT USAGE ON SCHEMA " + quoteIdentifier(managedSchema)
+                                + " TO " + quoteIdentifier(grantManager)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT SELECT, UPDATE ON TABLE "
+                                + quoteIdentifier(managedSchema) + "."
+                                + quoteIdentifier(table) + " TO "
+                                + quoteIdentifier(grantManager)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT CONNECT ON DATABASE " + quoteIdentifier(database)
+                                + " TO " + quoteIdentifier(externalGrantor)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT USAGE ON SCHEMA "
+                                + quoteIdentifier(externalSchema) + " TO "
+                                + quoteIdentifier(externalGrantor)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute(
+                        "GRANT SELECT, UPDATE ON TABLE "
+                                + quoteIdentifier(externalSchema) + "."
+                                + quoteIdentifier(table) + " TO "
+                                + quoteIdentifier(externalGrantor)
+                                + " WITH GRANT OPTION"
+                );
+                statement.execute("RESET ROLE");
+
+                statement.execute(
+                        "SET ROLE " + quoteIdentifier(grantManager)
+                );
+                statement.execute(
+                        "GRANT CONNECT ON DATABASE " + quoteIdentifier(database)
+                                + " TO " + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "GRANT USAGE ON SCHEMA " + quoteIdentifier(managedSchema)
+                                + " TO " + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "GRANT UPDATE ON TABLE "
+                                + quoteIdentifier(managedSchema) + "."
+                                + quoteIdentifier(table) + " TO "
+                                + quoteIdentifier(runtime)
+                );
+                statement.execute("RESET ROLE");
+
+                statement.execute(
+                        "SET ROLE " + quoteIdentifier(externalGrantor)
+                );
+                statement.execute(
+                        "GRANT CONNECT ON DATABASE " + quoteIdentifier(database)
+                                + " TO " + quoteIdentifier(externalRole)
+                );
+                statement.execute(
+                        "GRANT USAGE ON SCHEMA "
+                                + quoteIdentifier(externalSchema) + " TO "
+                                + quoteIdentifier(externalRole)
+                );
+                statement.execute(
+                        "GRANT SELECT ON TABLE "
+                                + quoteIdentifier(externalSchema) + "."
+                                + quoteIdentifier(table) + " TO "
+                                + quoteIdentifier(externalRole)
+                );
+                statement.execute("RESET ROLE");
+            }
+
+            PostgreSqlConfig grantManagerConfig = PostgreSqlConfig.from(
+                    Map.of(
+                            "jdbc-url", adminConfig.jdbcUrl(),
+                            "username", grantManager,
+                            "password", grantManagerPassword
+                    )
+            );
+            client = new JdbcPostgreSqlClient(grantManagerConfig);
+            backend = new PostgreSqlBackend(BACKEND_ID, client);
+            PactState desired = grantsOnlyState(
+                    database, managedSchema, runtime
+            );
+
+            assertTablePrivilege(
+                    adminConfig, database, runtime, managedSchema, table,
+                    "UPDATE", true
+            );
+            assertTablePrivilege(
+                    adminConfig, database, externalRole, externalSchema, table,
+                    "SELECT", true
+            );
+            backend.prepare(PactState.empty(), desired).apply();
+
+            assertEquals(
+                    Set.of(
+                            grant(
+                                    new GrantTarget(database, null, null, null),
+                                    runtime,
+                                    Privilege.CONNECT
+                            ),
+                            grant(
+                                    new GrantTarget(
+                                            database, managedSchema, null, null
+                                    ),
+                                    runtime,
+                                    Privilege.USAGE
+                            ),
+                            grant(
+                                    new GrantTarget(
+                                            database, managedSchema, table, null
+                                    ),
+                                    runtime,
+                                    Privilege.SELECT
+                            )
+                    ),
+                    client.getManagedGrants(Set.of(database))
+            );
+            assertTablePrivilege(
+                    adminConfig, database, runtime, managedSchema, table,
+                    "SELECT", true
+            );
+            assertTablePrivilege(
+                    adminConfig, database, runtime, managedSchema, table,
+                    "UPDATE", false
+            );
+            assertTablePrivilege(
+                    adminConfig, database, externalRole, externalSchema, table,
+                    "SELECT", true
+            );
+            assertTablePrivilege(
+                    adminConfig, database, externalRole, externalSchema, table,
+                    "UPDATE", false
+            );
+            assertEquals(
+                    owner,
+                    tableOwner(adminConfig, database, managedSchema, table)
+            );
+            assertEquals(
+                    owner,
+                    tableOwner(adminConfig, database, externalSchema, table)
+            );
+            assertEquals(
+                    1,
+                    tableRowCount(adminConfig, database, managedSchema, table)
+            );
+            assertEquals(
+                    1,
+                    tableRowCount(adminConfig, database, externalSchema, table)
+            );
+
+            backend.prepare(desired, PactState.empty()).apply();
+            assertTablePrivilege(
+                    adminConfig, database, runtime, managedSchema, table,
+                    "SELECT", false
+            );
+            assertTablePrivilege(
+                    adminConfig, database, externalRole, externalSchema, table,
+                    "SELECT", true
+            );
+            assertEquals(
+                    1,
+                    tableRowCount(adminConfig, database, externalSchema, table)
+            );
+        }
+        finally {
+            dropDatabaseAndRole(
+                    adminConfig,
+                    database,
+                    owner,
+                    grantManager,
+                    runtime,
+                    externalGrantor,
+                    externalRole
+            );
+        }
+    }
+
+    @Test
+    void authoritativeModeAcceptsColumnPrivilegeForTableOwner()
+            throws Exception {
+        PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
+                "username", required("PACT_IT_POSTGRESQL_USERNAME"),
+                "password", required("PACT_IT_POSTGRESQL_PASSWORD")
+        ));
+        PostgreSqlConfig authoritativeConfig = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", adminConfig.jdbcUrl(),
+                "username", adminConfig.username(),
+                "password", adminConfig.password(),
+                "reconciliation-mode", "authoritative"
+        ));
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String database = "pact_it_owner_column_" + suffix;
+        String owner = "pact_it_column_owner_" + suffix;
+        String table = "foo";
+        String column = "name";
+        JdbcPostgreSqlClient client =
+                new JdbcPostgreSqlClient(authoritativeConfig);
+        PostgreSqlBackend backend = new PostgreSqlBackend(BACKEND_ID, client);
+
+        try {
+            createDatabase(adminConfig, database);
+            try (Connection connection = databaseConnection(
+                    adminConfig,
+                    database,
+                    adminConfig.username(),
+                    adminConfig.password()
+            ); Statement statement = connection.createStatement()) {
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(owner) + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE TABLE public." + quoteIdentifier(table)
+                                + " (" + quoteIdentifier(column) + " text)"
+                );
+                statement.execute(
+                        "ALTER TABLE public." + quoteIdentifier(table)
+                                + " OWNER TO " + quoteIdentifier(owner)
+                );
+            }
+
+            PactState desired = new PactState(Set.of(permissionAccess(
+                    owner,
+                    Map.of(
+                            "database", database,
+                            "schema", "public",
+                            "table", table,
+                            "column", column
+                    ),
+                    Map.of("column", Set.of("SELECT"))
+            )));
+            backend.prepare(PactState.empty(), desired).apply();
+
+            assertTrue(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_column_privilege("
+                            + quoteLiteral(owner) + ", "
+                            + quoteLiteral("public." + table) + ", "
+                            + quoteLiteral(column) + ", 'SELECT')"
+            ));
+
+            backend.prepare(desired, PactState.empty()).apply();
+        }
+        finally {
+            dropDatabaseAndRole(adminConfig, database, owner);
+        }
+    }
+
+    @Test
+    void authoritativeModeAdoptsAndRollsBackExistingDefaultPrivileges()
+            throws Exception {
+        PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
+                "username", required("PACT_IT_POSTGRESQL_USERNAME"),
+                "password", required("PACT_IT_POSTGRESQL_PASSWORD")
+        ));
+        PostgreSqlConfig authoritativeConfig = PostgreSqlConfig.from(Map.of(
+                "jdbc-url", adminConfig.jdbcUrl(),
+                "username", adminConfig.username(),
+                "password", adminConfig.password(),
+                "reconciliation-mode", "authoritative"
+        ));
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String database = "pact_it_default_adopt_" + suffix;
+        String creator = "pact_it_default_creator_" + suffix;
+        String runtime = "pact_it_default_runtime_" + suffix;
+        String legacyRole = "pact_it_default_legacy_" + suffix;
+        String schema = "managed";
+        String table = "exception_table";
+        JdbcPostgreSqlClient client =
+                new JdbcPostgreSqlClient(authoritativeConfig);
+        PostgreSqlBackend backend = new PostgreSqlBackend(BACKEND_ID, client);
+
+        try {
+            createDatabase(adminConfig, database);
+            try (Connection connection = databaseConnection(
+                    adminConfig,
+                    database,
+                    adminConfig.username(),
+                    adminConfig.password()
+            ); Statement statement = connection.createStatement()) {
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(creator) + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(runtime) + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE ROLE " + quoteIdentifier(legacyRole) + " NOLOGIN"
+                );
+                statement.execute(
+                        "CREATE SCHEMA " + quoteIdentifier(schema)
+                                + " AUTHORIZATION " + quoteIdentifier(creator)
+                );
+                statement.execute("SET ROLE " + quoteIdentifier(creator));
+                statement.execute(
+                        "CREATE TABLE " + quoteIdentifier(schema) + "."
+                                + quoteIdentifier(table) + " (id integer)"
+                );
+                statement.execute(
+                        "ALTER DEFAULT PRIVILEGES IN SCHEMA "
+                                + quoteIdentifier(schema)
+                                + " GRANT SELECT, UPDATE ON TABLES TO "
+                                + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "ALTER DEFAULT PRIVILEGES IN SCHEMA "
+                                + quoteIdentifier(schema)
+                                + " GRANT USAGE ON SEQUENCES TO "
+                                + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "ALTER DEFAULT PRIVILEGES IN SCHEMA "
+                                + quoteIdentifier(schema)
+                                + " GRANT EXECUTE ON FUNCTIONS TO "
+                                + quoteIdentifier(runtime)
+                );
+                statement.execute(
+                        "ALTER DEFAULT PRIVILEGES IN SCHEMA "
+                                + quoteIdentifier(schema)
+                                + " GRANT DELETE ON TABLES TO "
+                                + quoteIdentifier(legacyRole)
+                );
+                statement.execute("RESET ROLE");
+            }
+
+            DefaultPrivilegeScope tableScope = new DefaultPrivilegeScope(
+                    database, schema, creator, DefaultPrivilegeType.TABLES
+            );
+            DefaultPrivilegeScope sequenceScope = new DefaultPrivilegeScope(
+                    database, schema, creator, DefaultPrivilegeType.SEQUENCES
+            );
+            DefaultPrivilegeScope routineScope = new DefaultPrivilegeScope(
+                    database, schema, creator, DefaultPrivilegeType.ROUTINES
+            );
+            Set<DefaultPrivilegeScope> scopes = Set.of(
+                    tableScope, sequenceScope, routineScope
+            );
+            Set<DefaultPrivilegeGrant> existingDefaults =
+                    client.getManagedDefaultPrivileges(scopes);
+            assertTrue(existingDefaults.contains(new DefaultPrivilegeGrant(
+                    tableScope, legacyRole, Privilege.DELETE
+            )));
+            PactState desired = defaultPrivilegesState(
+                    database, schema, creator, runtime
+            );
+            Set<DefaultPrivilegeGrant> desiredDefaults = Set.of(
+                    new DefaultPrivilegeGrant(
+                            tableScope, runtime, Privilege.SELECT
+                    ),
+                    new DefaultPrivilegeGrant(
+                            tableScope, runtime, Privilege.UPDATE
+                    ),
+                    new DefaultPrivilegeGrant(
+                            sequenceScope, runtime, Privilege.USAGE
+                    ),
+                    new DefaultPrivilegeGrant(
+                            routineScope, runtime, Privilege.EXECUTE
+                    )
+            );
+            var transaction = backend.prepare(PactState.empty(), desired);
+            transaction.apply();
+
+            assertEquals(desiredDefaults, client.getManagedDefaultPrivileges(scopes));
+            assertTrue(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_table_privilege("
+                            + quoteLiteral(runtime) + ", "
+                            + quoteLiteral(schema + "." + table)
+                            + ", 'SELECT')"
+            ));
+            assertFalse(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_table_privilege("
+                            + quoteLiteral(legacyRole) + ", "
+                            + quoteLiteral(schema + "." + table)
+                            + ", 'DELETE')"
+            ));
+
+            try (Connection connection = databaseConnection(
+                    adminConfig,
+                    database,
+                    adminConfig.username(),
+                    adminConfig.password()
+            ); Statement statement = connection.createStatement()) {
+                statement.execute("SET ROLE " + quoteIdentifier(creator));
+                statement.execute(
+                        "CREATE TABLE " + quoteIdentifier(schema)
+                                + ".future_table (id integer)"
+                );
+                statement.execute(
+                        "CREATE SEQUENCE " + quoteIdentifier(schema)
+                                + ".future_sequence"
+                );
+                statement.execute(
+                        "CREATE FUNCTION " + quoteIdentifier(schema)
+                                + ".future_function() RETURNS integer "
+                                + "LANGUAGE SQL IMMUTABLE AS 'SELECT 1'"
+                );
+                statement.execute("RESET ROLE");
+            }
+            assertTrue(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_table_privilege("
+                            + quoteLiteral(runtime) + ", "
+                            + quoteLiteral(schema + ".future_table")
+                            + ", 'UPDATE')"
+            ));
+            assertFalse(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_table_privilege("
+                            + quoteLiteral(legacyRole) + ", "
+                            + quoteLiteral(schema + ".future_table")
+                            + ", 'DELETE')"
+            ));
+            assertTrue(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_sequence_privilege("
+                            + quoteLiteral(runtime) + ", "
+                            + quoteLiteral(schema + ".future_sequence")
+                            + ", 'USAGE')"
+            ));
+            assertTrue(hasPrivilege(
+                    adminConfig,
+                    database,
+                    "SELECT has_function_privilege("
+                            + quoteLiteral(runtime) + ", "
+                            + quoteLiteral(schema + ".future_function()")
+                            + ", 'EXECUTE')"
+            ));
+
+            transaction.rollback();
+            assertEquals(existingDefaults, client.getManagedDefaultPrivileges(scopes));
+        }
+        finally {
+            dropDatabaseAndRole(
+                    adminConfig, database, creator, runtime, legacyRole
+            );
+        }
+    }
+
+    @Test
     void defaultPrivilegesCoverExistingCreatorOwnedAndFutureObjects()
                 throws Exception {
             PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
@@ -1533,6 +2325,44 @@ class PostgreSqlLiveIntegrationTest {
              var rows = statement.executeQuery(query)) {
             assertTrue(rows.next());
             return rows.getBoolean(1);
+        }
+    }
+
+    private static String tableOwner(
+            PostgreSqlConfig config,
+            String database,
+            String schema,
+            String table
+    ) throws SQLException {
+        String sql = """
+                SELECT pg_catalog.pg_get_userbyid(c.relowner)
+                FROM pg_catalog.pg_class AS c
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = %s
+                """.formatted(quoteLiteral(schema), quoteLiteral(table));
+        try (Connection connection = databaseConnection(
+                config, database, config.username(), config.password()
+        ); Statement statement = connection.createStatement();
+             var rows = statement.executeQuery(sql)) {
+            assertTrue(rows.next());
+            return rows.getString(1);
+        }
+    }
+
+    private static int tableRowCount(
+            PostgreSqlConfig config,
+            String database,
+            String schema,
+            String table
+    ) throws SQLException {
+        String sql = "SELECT count(*) FROM " + quoteIdentifier(schema) + "."
+                + quoteIdentifier(table);
+        try (Connection connection = databaseConnection(
+                config, database, config.username(), config.password()
+        ); Statement statement = connection.createStatement();
+             var rows = statement.executeQuery(sql)) {
+            assertTrue(rows.next());
+            return rows.getInt(1);
         }
     }
 
