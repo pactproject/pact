@@ -10,6 +10,10 @@ import io.github.pactproject.api.exception.ValidationException;
 import io.github.pactproject.postgresql.api.PostgreSqlClient;
 import io.github.pactproject.postgresql.api.PostgreSqlClientException;
 import io.github.pactproject.postgresql.compile.GrantCompiler;
+import io.github.pactproject.postgresql.compile.CompiledPostgreSqlState;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeGrant;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.Grant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,8 +53,9 @@ public final class PostgreSqlBackend implements Backend {
             PactState previousState,
             PactState desiredState
     ) throws BackendException {
-        compile(previousState);
-        Set<Grant> desiredGrants = compile(desiredState);
+        CompiledPostgreSqlState previous = compileState(previousState);
+        CompiledPostgreSqlState desired = compileState(desiredState);
+        Set<Grant> desiredGrants = desired.grants();
         Set<Identity> previousIdentities =
                 compileIdentities(previousState);
         Set<Identity> desiredIdentities =
@@ -60,9 +65,19 @@ public final class PostgreSqlBackend implements Backend {
         );
         databases.addAll(GrantCompiler.databases(desiredState, id));
         Set<String> scope = Set.copyOf(databases);
+        Set<DefaultPrivilegeScope> defaultScopes = new HashSet<>(
+                previous.defaultPrivilegeScopes()
+        );
+        defaultScopes.addAll(desired.defaultPrivilegeScopes());
+        Set<DefaultPrivilegeScope> snapshotDefaultScopes =
+                Set.copyOf(defaultScopes);
         Set<Grant> snapshot;
+        Set<DefaultPrivilegeGrant> defaultSnapshot;
         try {
             snapshot = client.getManagedGrants(scope);
+            defaultSnapshot = client.getManagedDefaultPrivileges(
+                    snapshotDefaultScopes
+            );
         }
         catch (PostgreSqlClientException e) {
             throw new BackendOperationException(
@@ -80,6 +95,8 @@ public final class PostgreSqlBackend implements Backend {
                 scope.size(),
                 desiredIdentities.size()
         );
+        Set<DefaultPrivilegeOverride> defaultOverrides =
+                desired.defaultPrivilegeOverrides();
         return new BackendTransaction() {
             @Override
             public void apply() throws BackendException {
@@ -95,7 +112,14 @@ public final class PostgreSqlBackend implements Backend {
                         previousIdentities,
                         desiredIdentities
                 );
-                synchronize(scope, desiredGrants, "apply");
+                synchronize(
+                        scope,
+                        desiredGrants,
+                        desired.defaultPrivileges(),
+                        snapshotDefaultScopes,
+                        defaultOverrides,
+                        "apply"
+                );
                 log.info("Reconciled PostgreSQL backend '{}'", id);
             }
 
@@ -108,7 +132,14 @@ public final class PostgreSqlBackend implements Backend {
                         snapshot.size(),
                         scope.size()
                 );
-                synchronize(scope, snapshot, "rollback");
+                synchronize(
+                        scope,
+                        snapshot,
+                        defaultSnapshot,
+                        snapshotDefaultScopes,
+                        Set.of(),
+                        "rollback"
+                );
                 log.info("Rolled back PostgreSQL grants for backend '{}'", id);
             }
         };
@@ -144,10 +175,10 @@ public final class PostgreSqlBackend implements Backend {
         }
     }
 
-    private Set<Grant> compile(PactState state)
+    private CompiledPostgreSqlState compileState(PactState state)
             throws ValidationException {
         try {
-            return GrantCompiler.compile(state, id);
+            return GrantCompiler.compileState(state, id);
         }
         catch (IllegalArgumentException e) {
             throw new ValidationException(
@@ -161,10 +192,15 @@ public final class PostgreSqlBackend implements Backend {
     private void synchronize(
             Set<String> databases,
             Set<Grant> desired,
+            Set<DefaultPrivilegeGrant> defaults,
+            Set<DefaultPrivilegeScope> defaultScopes,
+            Set<DefaultPrivilegeOverride> overrides,
             String operation
     ) throws BackendException {
         try {
-            client.synchronize(databases, desired);
+            client.synchronize(
+                    databases, desired, defaults, defaultScopes, overrides
+            );
         }
         catch (PostgreSqlClientException e) {
             throw new BackendOperationException(

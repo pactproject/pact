@@ -4,6 +4,9 @@ import io.github.pactproject.postgresql.model.Grant;
 import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.RoutineSignature;
 import io.github.pactproject.postgresql.model.Privilege;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeGrant;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeType;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -41,6 +44,14 @@ class JdbcPostgreSqlClientTest {
                 "GRANT CONNECT ON DATABASE \"a\"\"b\" TO \"alice\"",
                 JdbcPostgreSqlClient.statement("GRANT", grant(
                         new GrantTarget("a\"b", null, null, null),
+                        Privilege.CONNECT
+                ))
+        );
+        assertEquals(
+                "GRANT CONNECT ON DATABASE \"analytics\" TO PUBLIC",
+                JdbcPostgreSqlClient.statement("GRANT", new Grant(
+                        new GrantTarget("analytics", null, null, null),
+                        "PUBLIC",
                         Privilege.CONNECT
                 ))
         );
@@ -106,6 +117,33 @@ class JdbcPostgreSqlClientTest {
         assertThrows(
                 java.sql.SQLException.class,
                 () -> JdbcPostgreSqlClient.quotePassword("nul\0byte")
+        );
+    }
+
+    @Test
+    void buildsSchemaScopedDefaultPrivilegeStatements() {
+        DefaultPrivilegeGrant grant = new DefaultPrivilegeGrant(
+                new DefaultPrivilegeScope(
+                        "analytics", "sales", "sales_migrator",
+                        DefaultPrivilegeType.TABLES
+                ),
+                "PUBLIC",
+                Privilege.SELECT
+        );
+        assertEquals(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"sales_migrator\" "
+                        + "IN SCHEMA \"sales\" GRANT SELECT ON TABLES TO PUBLIC",
+                JdbcPostgreSqlClient.defaultPrivilegeStatement(
+                        "GRANT", grant, false
+                )
+        );
+        assertEquals(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"sales_migrator\" "
+                        + "IN SCHEMA \"sales\" REVOKE GRANT OPTION FOR SELECT "
+                        + "ON TABLES FROM PUBLIC",
+                JdbcPostgreSqlClient.defaultPrivilegeStatement(
+                        "REVOKE", grant, true
+                )
         );
     }
 

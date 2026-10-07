@@ -13,8 +13,6 @@ public record GrantTarget(
         RoutineSignature function,
         RoutineSignature procedure
 ) {
-    public static final String WILDCARD = "*";
-
     public GrantTarget(
             String database,
             String schema,
@@ -47,11 +45,6 @@ public record GrantTarget(
 
     public GrantTarget {
         requireName(database, "database");
-        if (WILDCARD.equals(database)) {
-            throw new IllegalArgumentException(
-                    "PostgreSQL database target must not be a wildcard"
-            );
-        }
         if (schema == null
                 && (table != null || column != null || sequence != null
                 || function != null || procedure != null)) {
@@ -135,17 +128,16 @@ public record GrantTarget(
         );
     }
 
-    public boolean hasWildcard() {
-        return WILDCARD.equals(schema)
-                || WILDCARD.equals(table)
-                || WILDCARD.equals(column)
-                || WILDCARD.equals(sequence);
-    }
-
     private static void requireName(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(
                     "PostgreSQL " + field + " target must not be blank"
+            );
+        }
+        if ("*".equals(value)) {
+            throw new IllegalArgumentException(
+                    "PostgreSQL wildcard targets are not supported; use "
+                            + "defaultPrivileges for schema-wide access"
             );
         }
     }

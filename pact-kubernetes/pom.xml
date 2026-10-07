@@ -10,12 +10,13 @@
     </parent>
 
     <artifactId>pact-kubernetes</artifactId>
+    <version>1.0.0</version>
 
     <dependencies>
         <dependency>
             <groupId>io.github.pactproject</groupId>
             <artifactId>pact-api</artifactId>
-            <version>${project.version}</version>
+            <version>${pact.api.version}</version>
         </dependency>
 
         <dependency>

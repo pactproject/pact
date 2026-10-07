@@ -11,12 +11,13 @@
     </parent>
 
     <artifactId>pact-postgresql</artifactId>
+    <version>1.0.1</version>
 
     <dependencies>
         <dependency>
             <groupId>io.github.pactproject</groupId>
             <artifactId>pact-api</artifactId>
-            <version>${project.version}</version>
+            <version>${pact.api.version}</version>
         </dependency>
 
         <dependency>

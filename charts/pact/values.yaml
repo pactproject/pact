@@ -1,14 +1,14 @@
 image:
-  repository: pact
+  repository: ghcr.io/pactproject/pact
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: 1.0.0
 
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
 dataAccess:
-  group: com.example.ru
+  group: pactproject.github.io
   version: v1
   plural: dataaccesses
   singular: dataaccess

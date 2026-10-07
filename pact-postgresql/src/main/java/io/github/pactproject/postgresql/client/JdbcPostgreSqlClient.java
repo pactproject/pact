@@ -1,9 +1,14 @@
 package io.github.pactproject.postgresql.client;
 
 import io.github.pactproject.postgresql.PostgreSqlConfig;
+import io.github.pactproject.postgresql.PostgreSqlReconciliationMode;
 import io.github.pactproject.postgresql.api.PostgreSqlClient;
 import io.github.pactproject.postgresql.api.PostgreSqlClientException;
 import io.github.pactproject.api.Identity;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeGrant;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeType;
 import io.github.pactproject.postgresql.model.Grant;
 import io.github.pactproject.postgresql.model.GrantLevel;
 import io.github.pactproject.postgresql.model.GrantTarget;
@@ -20,7 +25,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -33,114 +37,159 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             "^(jdbc:postgresql:(?://[^/?]*)?)(?:/?([^?]*))?(\\?.*)?$"
     );
 
-    private static final String GRANTOR =
-            "(SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)";
-    private static final String OWNED_BY_GRANTOR =
-            "acl.grantor = " + GRANTOR
-                    + " AND acl.grantee <> 0 AND acl.grantee <> " + GRANTOR;
+    private static final String ACL_GRANTEE =
+            "CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END";
     private static final String USER_SCHEMA =
             "n.nspname NOT LIKE 'pg!_%' ESCAPE '!' "
                     + "AND n.nspname <> 'information_schema'";
     private static final String RELATION_KINDS =
             "c.relkind IN ('r', 'p', 'v', 'm', 'f')";
 
-    private static final String DATABASE_GRANTS = """
-            SELECT grantee.rolname, acl.privilege_type, acl.is_grantable
+    private static final String DATABASE_GRANTS = "SELECT "
+            + ACL_GRANTEE + """
+            , acl.privilege_type,
+                   acl.is_grantable, grantor.rolname,
+                   acl.grantor = d.datdba, acl.grantee = d.datdba
             FROM pg_catalog.pg_database AS d
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba))
             ) AS acl
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-            WHERE d.datname = current_database() AND\s""" + OWNED_BY_GRANTOR;
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+            WHERE d.datname = current_database()""";
 
-    private static final String SCHEMA_GRANTS = """
-            SELECT n.nspname, grantee.rolname, acl.privilege_type, acl.is_grantable
+    private static final String SCHEMA_GRANTS = "SELECT n.nspname, "
+            + ACL_GRANTEE + """
+            ,
+                   acl.privilege_type, acl.is_grantable, grantor.rolname,
+                   acl.grantor = n.nspowner, acl.grantee = n.nspowner
             FROM pg_catalog.pg_namespace AS n
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))
             ) AS acl
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-            WHERE\s""" + USER_SCHEMA + " AND " + OWNED_BY_GRANTOR;
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+            WHERE\s""" + USER_SCHEMA;
 
-    private static final String TABLE_GRANTS = """
-            SELECT n.nspname, c.relname, grantee.rolname,
-                   acl.privilege_type, acl.is_grantable
+    private static final String TABLE_GRANTS =
+            "SELECT n.nspname, c.relname, " + ACL_GRANTEE + """
+            ,
+                   acl.privilege_type, acl.is_grantable, grantor.rolname,
+                   acl.grantor = c.relowner, acl.grantee = c.relowner
             FROM pg_catalog.pg_class AS c
             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))
             ) AS acl
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-            WHERE\s""" + RELATION_KINDS + " AND " + USER_SCHEMA
-            + " AND " + OWNED_BY_GRANTOR;
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+            WHERE\s""" + RELATION_KINDS + " AND " + USER_SCHEMA;
 
-    private static final String COLUMN_GRANTS = """
-            SELECT n.nspname, c.relname, a.attname, grantee.rolname,
-                   acl.privilege_type, acl.is_grantable
+    private static final String COLUMN_GRANTS =
+            "SELECT n.nspname, c.relname, a.attname, " + ACL_GRANTEE + """
+            ,
+                   acl.privilege_type, acl.is_grantable, grantor.rolname,
+                   acl.grantor = c.relowner, acl.grantee = c.relowner
             FROM pg_catalog.pg_attribute AS a
             JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
             CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) AS acl
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
             WHERE a.attnum > 0 AND NOT a.attisdropped AND\s"""
-            + RELATION_KINDS + " AND " + USER_SCHEMA
-            + " AND " + OWNED_BY_GRANTOR;
+            + RELATION_KINDS + " AND " + USER_SCHEMA;
 
-    private static final String SEQUENCE_GRANTS = """
-            SELECT n.nspname, c.relname, grantee.rolname,
-                   acl.privilege_type, acl.is_grantable
+    private static final String SEQUENCE_GRANTS =
+            "SELECT n.nspname, c.relname, " + ACL_GRANTEE + """
+            ,
+                   acl.privilege_type, acl.is_grantable, grantor.rolname,
+                   acl.grantor = c.relowner, acl.grantee = c.relowner
             FROM pg_catalog.pg_class AS c
             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(c.relacl, pg_catalog.acldefault('S', c.relowner))
             ) AS acl
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-            WHERE c.relkind = 'S' AND\s""" + USER_SCHEMA
-            + " AND " + OWNED_BY_GRANTOR;
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+            WHERE c.relkind = 'S' AND\s""" + USER_SCHEMA;
 
-    private static final String FUNCTION_GRANTS = """
-            SELECT n.nspname, p.proname,
-                   pg_catalog.pg_get_function_identity_arguments(p.oid),
-                   grantee.rolname, acl.privilege_type, acl.is_grantable
+    private static final String FUNCTION_GRANTS =
+            "SELECT n.nspname, p.proname, "
+                   + "pg_catalog.pg_get_function_identity_arguments(p.oid), "
+                   + ACL_GRANTEE + """
+            , acl.privilege_type,
+                   acl.is_grantable, grantor.rolname,
+                   acl.grantor = p.proowner, acl.grantee = p.proowner
             FROM pg_catalog.pg_proc AS p
             JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
             ) AS acl
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-            WHERE p.prokind IN ('f', 'a', 'w') AND\s""" + USER_SCHEMA
-            + " AND " + OWNED_BY_GRANTOR;
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+            WHERE p.prokind IN ('f', 'a', 'w') AND\s""" + USER_SCHEMA;
 
-    private static final String PROCEDURE_GRANTS = """
-            SELECT n.nspname, p.proname,
-                   pg_catalog.pg_get_function_identity_arguments(p.oid),
-                   grantee.rolname, acl.privilege_type, acl.is_grantable
+    private static final String PROCEDURE_GRANTS =
+            "SELECT n.nspname, p.proname, "
+                   + "pg_catalog.pg_get_function_identity_arguments(p.oid), "
+                   + ACL_GRANTEE + """
+            , acl.privilege_type,
+                   acl.is_grantable, grantor.rolname,
+                   acl.grantor = p.proowner, acl.grantee = p.proowner
             FROM pg_catalog.pg_proc AS p
             JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
             ) AS acl
-            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-            WHERE p.prokind = 'p' AND\s""" + USER_SCHEMA
-            + " AND " + OWNED_BY_GRANTOR;
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+            WHERE p.prokind = 'p' AND\s""" + USER_SCHEMA;
 
     private static final String LIST_SCHEMAS =
             "SELECT n.nspname FROM pg_catalog.pg_namespace AS n WHERE "
                     + USER_SCHEMA;
     private static final String LIST_TABLES =
-            "SELECT c.relname FROM pg_catalog.pg_class AS c "
+            "SELECT c.relname, owner.rolname "
+                    + "FROM pg_catalog.pg_class AS c "
                     + "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+                    + "JOIN pg_catalog.pg_roles AS owner ON owner.oid = c.relowner "
                     + "WHERE n.nspname = ? AND " + RELATION_KINDS;
-    private static final String LIST_COLUMNS =
-            "SELECT a.attname FROM pg_catalog.pg_attribute AS a "
-                    + "JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid "
-                    + "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
-                    + "WHERE n.nspname = ? AND c.relname = ? "
-                    + "AND a.attnum > 0 AND NOT a.attisdropped";
     private static final String LIST_SEQUENCES =
-            "SELECT c.relname FROM pg_catalog.pg_class AS c "
+            "SELECT c.relname, owner.rolname "
+                    + "FROM pg_catalog.pg_class AS c "
                     + "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+                    + "JOIN pg_catalog.pg_roles AS owner ON owner.oid = c.relowner "
                     + "WHERE n.nspname = ? AND c.relkind = 'S'";
+    private static final String LIST_ROUTINES = """
+            SELECT p.proname,
+                   pg_catalog.pg_get_function_identity_arguments(p.oid),
+                   p.prokind,
+                   owner.rolname
+            FROM pg_catalog.pg_proc AS p
+            JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+            JOIN pg_catalog.pg_roles AS owner ON owner.oid = p.proowner
+            WHERE n.nspname = ? AND p.prokind IN ('f', 'a', 'w', 'p')
+            """;
+    private static final String DEFAULT_PRIVILEGE_ACL = """
+            SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END,
+                   acl.privilege_type, acl.is_grantable, grantor.rolname,
+                   acl.grantee = owner.oid
+            FROM pg_catalog.pg_default_acl AS d
+            JOIN pg_catalog.pg_roles AS owner ON owner.oid = d.defaclrole
+            JOIN pg_catalog.pg_namespace AS n ON n.oid = d.defaclnamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) AS acl
+            LEFT JOIN pg_catalog.pg_roles AS grantee
+                ON grantee.oid = acl.grantee
+            JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+            WHERE owner.rolname = ? AND n.nspname = ? AND d.defaclobjtype = ?
+            """;
 
     private final PostgreSqlConfig config;
 
@@ -154,6 +203,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         Set<Grant> result = new HashSet<>();
         for (String database : databases) {
             try (Connection connection = connect(database)) {
+                verifyAuthoritativeSuperuser(connection);
                 try (Statement statement = connection.createStatement()) {
                     statement.execute("SET search_path TO pg_catalog");
                 }
@@ -163,6 +213,41 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                 throw new PostgreSqlClientException(
                         "Failed to read PACT-owned PostgreSQL grants in database '"
                                 + database + "'",
+                        e
+                );
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    @Override
+    public Set<DefaultPrivilegeGrant> getManagedDefaultPrivileges(
+            Set<DefaultPrivilegeScope> scopes
+    ) throws PostgreSqlClientException {
+        Set<DefaultPrivilegeGrant> result = new HashSet<>();
+        Set<String> databases = scopes.stream()
+                .map(DefaultPrivilegeScope::database)
+                .collect(java.util.stream.Collectors.toSet());
+        for (String database : databases) {
+            Set<DefaultPrivilegeScope> databaseScopes = scopes.stream()
+                    .filter(scope -> scope.database().equals(database))
+                    .collect(java.util.stream.Collectors.toSet());
+            try (Connection connection = connect(database)) {
+                verifyAuthoritativeSuperuser(connection);
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("SET search_path TO pg_catalog");
+                }
+                for (AclDefaultPrivilege acl
+                        : loadAclDefaultPrivileges(connection, databaseScopes)) {
+                    if (isManagedDefaultPrivilege(acl, database)) {
+                        result.add(acl.grant());
+                    }
+                }
+            }
+            catch (SQLException e) {
+                throw new PostgreSqlClientException(
+                        "Failed to read PACT-owned PostgreSQL default "
+                                + "privileges in database '" + database + "'",
                         e
                 );
             }
@@ -194,6 +279,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         }
 
         try (Connection connection = connectConfiguredDatabase()) {
+            verifyAuthoritativeSuperuser(connection);
             connection.setAutoCommit(false);
             try {
                 List<Identity> ordered = desired.stream()
@@ -224,7 +310,13 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     }
 
     @Override
-    public void synchronize(Set<String> databases, Set<Grant> desired)
+    public void synchronize(
+            Set<String> databases,
+            Set<Grant> desired,
+            Set<DefaultPrivilegeGrant> desiredDefaults,
+            Set<DefaultPrivilegeScope> defaultScopes,
+            Set<DefaultPrivilegeOverride> overrides
+    )
             throws PostgreSqlClientException {
         for (Grant grant : desired) {
             if (!databases.contains(grant.database())) {
@@ -233,13 +325,37 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                 );
             }
         }
+        for (DefaultPrivilegeScope scope : defaultScopes) {
+            if (!databases.contains(scope.database())) {
+                throw new PostgreSqlClientException(
+                        "Default privilege scope is outside its PostgreSQL "
+                                + "reconciliation scope"
+                );
+            }
+        }
+        for (DefaultPrivilegeGrant grant : desiredDefaults) {
+            if (!defaultScopes.contains(grant.scope())) {
+                throw new PostgreSqlClientException(
+                        "Desired default privilege is outside its PostgreSQL "
+                                + "reconciliation scope"
+                );
+            }
+        }
         // Each database needs its own connection, so the sync is atomic per
         // database only; the backend transaction compensates across databases.
         for (String database : databases) {
             try (Connection connection = connect(database)) {
+                verifyAuthoritativeSuperuser(connection);
                 connection.setAutoCommit(false);
                 try {
-                    synchronizeDatabase(connection, database, desired);
+                    synchronizeDatabase(
+                            connection,
+                            database,
+                            desired,
+                            desiredDefaults,
+                            defaultScopes,
+                            overrides
+                    );
                     connection.commit();
                 }
                 catch (SQLException | RuntimeException e) {
@@ -260,30 +376,343 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     private void synchronizeDatabase(
             Connection connection,
             String database,
-            Set<Grant> desired
+            Set<Grant> desired,
+            Set<DefaultPrivilegeGrant> desiredDefaults,
+            Set<DefaultPrivilegeScope> defaultScopes,
+            Set<DefaultPrivilegeOverride> overrides
     ) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("SET LOCAL search_path TO pg_catalog");
         }
+        List<Grant> databaseGrants = desired.stream()
+                .filter(grant -> grant.database().equals(database))
+                .toList();
         Set<Grant> wanted = expand(
                 connection,
                 database,
-                desired.stream()
-                        .filter(grant -> grant.database().equals(database))
-                        .toList()
+                databaseGrants
         );
-        Set<Grant> actual = loadManagedGrants(connection, database);
-        GrantDiff.Result diff = GrantDiff.diff(actual, wanted);
-        if (diff.delete().isEmpty() && diff.create().isEmpty()) {
+        Set<DefaultPrivilegeScope> databaseDefaultScopes = defaultScopes.stream()
+                .filter(scope -> scope.database().equals(database))
+                .collect(java.util.stream.Collectors.toSet());
+        Set<DefaultPrivilegeGrant> databaseDefaults = desiredDefaults.stream()
+                .filter(grant -> grant.scope().database().equals(database))
+                .collect(java.util.stream.Collectors.toSet());
+        Set<Grant> inherited = expandDefaultPrivileges(
+                connection,
+                database,
+                databaseDefaults
+        );
+        inherited.removeIf(grant -> overrides.stream()
+                .anyMatch(override -> override.matches(grant)));
+        wanted.addAll(inherited);
+
+        if (config.reconciliationMode()
+                == PostgreSqlReconciliationMode.AUTHORITATIVE) {
+            synchronizeAuthoritativeDatabase(connection, database, wanted);
+        }
+        else {
+            if (wanted.stream().anyMatch(grant -> "PUBLIC".equals(grant.role()))) {
+                throw new SQLException(
+                        "PostgreSQL PUBLIC grants require authoritative "
+                                + "reconciliation mode"
+                );
+            }
+            Set<Grant> actual = loadManagedGrants(connection, database);
+            GrantDiff.Result diff = GrantDiff.diff(actual, wanted);
+            if (!diff.delete().isEmpty() || !diff.create().isEmpty()) {
+                for (Grant grant : diff.delete()) {
+                    execute(connection, "REVOKE", grant);
+                }
+                actual = loadManagedGrants(connection, database);
+                for (Grant grant : GrantDiff.diff(actual, wanted).create()) {
+                    execute(connection, "GRANT", grant);
+                }
+                GrantDiff.Result remaining = GrantDiff.diff(
+                        loadManagedGrants(connection, database),
+                        wanted
+                );
+                if (!remaining.create().isEmpty()
+                        || !remaining.delete().isEmpty()) {
+                    throw new SQLException(
+                            "PostgreSQL did not apply the complete desired ACL "
+                                    + "in database '" + database + "' ("
+                                    + remaining.create().size()
+                                    + " grant(s) missing, "
+                                    + remaining.delete().size()
+                                    + " stale grant(s) remain); verify the "
+                                    + "grantor's authority and GRANT OPTION"
+                    );
+                }
+            }
+        }
+        synchronizeDefaultPrivileges(
+                connection,
+                database,
+                databaseDefaults,
+                databaseDefaultScopes
+        );
+    }
+
+    private void synchronizeDefaultPrivileges(
+            Connection connection,
+            String database,
+            Set<DefaultPrivilegeGrant> desired,
+            Set<DefaultPrivilegeScope> scopes
+    ) throws SQLException {
+        if (scopes.isEmpty()) {
             return;
         }
-        for (Grant grant : diff.delete()) {
-            execute(connection, "REVOKE", grant);
+        if (config.reconciliationMode()
+                == PostgreSqlReconciliationMode.GRANTOR
+                && desired.stream().anyMatch(
+                        grant -> "PUBLIC".equals(grant.role()))) {
+            throw new SQLException(
+                    "PostgreSQL PUBLIC default privileges require "
+                            + "authoritative reconciliation mode"
+            );
         }
-        // Re-read after revokes before granting to keep the ACL diff authoritative.
-        actual = loadManagedGrants(connection, database);
-        for (Grant grant : GrantDiff.diff(actual, wanted).create()) {
+
+        List<AclDefaultPrivilege> revocations = new ArrayList<>();
+        for (AclDefaultPrivilege acl
+                : loadAclDefaultPrivileges(connection, scopes)) {
+            if (isManagedDefaultPrivilege(acl, database)
+                    && (!desired.contains(acl.grant()) || acl.grantable())) {
+                revocations.add(acl);
+            }
+        }
+        revocations.sort(java.util.Comparator
+                .comparing(AclDefaultPrivilege::grantor)
+                .thenComparing(acl -> acl.grant().toString()));
+        for (AclDefaultPrivilege acl : revocations) {
+            executeDefaultPrivilege(
+                    connection,
+                    "REVOKE",
+                    acl.grant(),
+                    acl.grantable() && desired.contains(acl.grant()),
+                    acl.grantor()
+            );
+        }
+
+        Set<DefaultPrivilegeGrant> actual = managedDefaultPrivileges(
+                loadAclDefaultPrivileges(connection, scopes),
+                database
+        );
+        for (DefaultPrivilegeGrant grant : desired.stream()
+                .sorted(java.util.Comparator.comparing(
+                        DefaultPrivilegeGrant::toString
+                ))
+                .toList()) {
+            if (!actual.contains(grant)) {
+                executeDefaultPrivilege(
+                        connection, "GRANT", grant, false, null
+                );
+            }
+        }
+
+        Set<AclDefaultPrivilege> finalAcl =
+                loadAclDefaultPrivileges(connection, scopes);
+        Set<DefaultPrivilegeGrant> finalPrivileges =
+                managedDefaultPrivileges(finalAcl, database);
+        Set<DefaultPrivilegeGrant> missing = new HashSet<>(desired);
+        missing.removeAll(finalPrivileges);
+        Set<DefaultPrivilegeGrant> stale =
+                new HashSet<>(finalPrivileges);
+        stale.removeAll(desired);
+        long grantOptions = 0;
+        for (AclDefaultPrivilege acl : finalAcl) {
+            if (isManagedDefaultPrivilege(acl, database) && acl.grantable()) {
+                grantOptions++;
+            }
+        }
+        if (!missing.isEmpty() || !stale.isEmpty() || grantOptions > 0) {
+            throw new SQLException(
+                    "PostgreSQL default privilege reconciliation is "
+                            + "incomplete in database '" + database + "' ("
+                            + missing.size() + " missing, "
+                            + stale.size() + " stale, "
+                            + grantOptions + " grant option(s) remain)"
+            );
+        }
+    }
+
+    private Set<DefaultPrivilegeGrant> managedDefaultPrivileges(
+            Set<AclDefaultPrivilege> acl,
+            String database
+    ) throws SQLException {
+        Set<DefaultPrivilegeGrant> result = new HashSet<>();
+        for (AclDefaultPrivilege entry : acl) {
+            if (isManagedDefaultPrivilege(entry, database)) {
+                result.add(entry.grant());
+            }
+        }
+        return result;
+    }
+
+    private void executeDefaultPrivilege(
+            Connection connection,
+            String operation,
+            DefaultPrivilegeGrant grant,
+            boolean grantOptionOnly,
+            String grantor
+    ) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            if (grantor != null) {
+                statement.execute(
+                        "SET LOCAL ROLE " + quoteIdentifier(grantor)
+                );
+            }
+            statement.execute(defaultPrivilegeStatement(
+                    operation, grant, grantOptionOnly
+            ));
+            if (grantor != null) {
+                statement.execute("SET LOCAL ROLE NONE");
+            }
+        }
+    }
+
+    static String defaultPrivilegeStatement(
+            String operation,
+            DefaultPrivilegeGrant grant,
+            boolean grantOptionOnly
+    ) {
+        DefaultPrivilegeScope scope = grant.scope();
+        String prefix = "ALTER DEFAULT PRIVILEGES FOR ROLE "
+                + quoteIdentifier(scope.creator()) + " IN SCHEMA "
+                + quoteIdentifier(scope.schema()) + " ";
+        String action = operation + " ";
+        if (grantOptionOnly) {
+            action += "GRANT OPTION FOR ";
+        }
+        action += grant.privilege().name() + " ON "
+                + scope.type().sqlType()
+                + ("GRANT".equals(operation) ? " TO " : " FROM ")
+                + grantee(grant.role());
+        return prefix + action;
+    }
+
+    private void synchronizeAuthoritativeDatabase(
+            Connection connection,
+            String database,
+            Set<Grant> wanted
+    )     throws SQLException {
+    Set<AclGrant> actual = loadAclGrants(connection, database);
+    List<AclGrant> revocations = actual.stream()
+            .filter(acl -> !acl.granteeIsOwner()
+                    && !isPreservedDefaultPublicAcl(acl))
+            .filter(acl -> !wanted.contains(acl.grant())
+                    || acl.grantable())
+            .sorted(java.util.Comparator
+                    .comparingInt((AclGrant acl) -> revokeOrder(
+                            acl.grant().target().level()
+                    ))
+                    .reversed()
+                    .thenComparing(AclGrant::grantor)
+                    .thenComparing(acl -> acl.grant().toString()))
+            .toList();
+    for (AclGrant acl : revocations) {
+        if (!wanted.contains(acl.grant())) {
+            executeRevokeAsGrantor(connection, acl, false);
+        }
+        else if (acl.grantable()) {
+            executeRevokeAsGrantor(connection, acl, true);
+        }
+    }
+
+    Set<Grant> actualGrants = authoritativeGrants(
+            loadAclGrants(connection, database)
+    );
+    for (Grant grant : wanted) {
+        if (!actualGrants.contains(grant)) {
             execute(connection, "GRANT", grant);
+        }
+    }
+
+    Set<AclGrant> finalAcl = loadAclGrants(connection, database);
+        Set<Grant> finalGrants = authoritativeGrants(finalAcl);
+        Set<Grant> missing = new HashSet<>(wanted);
+        missing.removeAll(finalGrants);
+    Set<Grant> stale = authoritativeManagedGrants(finalAcl);
+        stale.removeAll(wanted);
+        long grantOptions = finalAcl.stream()
+                .filter(acl -> !acl.granteeIsOwner()
+                        && !isPreservedDefaultPublicAcl(acl)
+                        && acl.grantable())
+                .count();
+        if (!missing.isEmpty() || !stale.isEmpty() || grantOptions > 0) {
+            throw new SQLException(
+                    "PostgreSQL authoritative ACL reconciliation is incomplete "
+                            + "in database '" + database + "' ("
+                            + missing.size() + " missing grant(s), "
+                            + stale.size() + " stale grant(s), "
+                            + grantOptions + " grant option(s) remain)"
+            );
+        }
+    }
+
+    private static int revokeOrder(GrantLevel level) {
+        return switch (level) {
+            case COLUMN -> 4;
+            case TABLE, SEQUENCE, FUNCTION, PROCEDURE -> 3;
+            case SCHEMA -> 2;
+            case DATABASE -> 1;
+        };
+    }
+
+    private Set<Grant> authoritativeGrants(Set<AclGrant> aclGrants) {
+        Set<Grant> result = new HashSet<>();
+        for (AclGrant acl : aclGrants) {
+            if (!acl.granteeIsOwner()) {
+                result.add(acl.grant());
+            }
+        }
+        return result;
+    }
+
+    private Set<Grant> authoritativeManagedGrants(Set<AclGrant> aclGrants) {
+        Set<Grant> result = new HashSet<>();
+        for (AclGrant acl : aclGrants) {
+            if (!acl.granteeIsOwner()
+                    && !isPreservedDefaultPublicAcl(acl)) {
+                result.add(acl.grant());
+            }
+        }
+        return result;
+    }
+
+    private void executeRevokeAsGrantor(
+            Connection connection,
+            AclGrant acl,
+            boolean grantOptionOnly
+    ) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute(
+                    "SET LOCAL ROLE " + quoteIdentifier(acl.grantor())
+            );
+            statement.execute(
+                    revokeStatement(acl.grant(), grantOptionOnly) + " CASCADE"
+            );
+            statement.execute("SET LOCAL ROLE NONE");
+        }
+    }
+
+    private void verifyAuthoritativeSuperuser(Connection connection)
+            throws SQLException {
+        if (config.reconciliationMode()
+                != PostgreSqlReconciliationMode.AUTHORITATIVE) {
+            return;
+        }
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery(
+                     "SELECT rolsuper FROM pg_catalog.pg_roles "
+                             + "WHERE rolname = current_user"
+             )) {
+            if (!rows.next() || !rows.getBoolean(1)) {
+                throw new SQLException(
+                        "PostgreSQL authoritative reconciliation requires "
+                                + "a superuser login"
+                );
+            }
         }
     }
 
@@ -433,56 +862,106 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     private Set<Grant> loadManagedGrants(Connection connection, String database)
             throws SQLException {
         Set<Grant> result = new HashSet<>();
+        for (AclGrant acl : loadAclGrants(connection, database)) {
+            Grant grant = acl.grant();
+            if (config.reconciliationMode()
+                    == PostgreSqlReconciliationMode.AUTHORITATIVE) {
+                if (!acl.granteeIsOwner()
+                        && !isPreservedDefaultPublicAcl(acl)) {
+                    result.add(grant);
+                }
+                continue;
+            }
+
+            if (!config.username().equals(acl.grantor())
+                    || config.username().equals(grant.role())
+                    || "PUBLIC".equals(grant.role())) {
+                continue;
+            }
+            if (acl.grantable()) {
+                throw new SQLException(
+                        "PACT grantor has a grant-option privilege on "
+                                + grant.target().level().key()
+                                + " in database '" + database
+                                + "'; grant options are outside the managed contract"
+                );
+            }
+            result.add(grant);
+        }
+        return Set.copyOf(result);
+    }
+
+    private Set<AclGrant> loadAclGrants(
+            Connection connection,
+            String database
+    ) throws SQLException {
+        Set<AclGrant> result = new HashSet<>();
         try (Statement statement = connection.createStatement()) {
             try (ResultSet rows = statement.executeQuery(DATABASE_GRANTS)) {
                 while (rows.next()) {
-                    result.add(grant(
+                    result.add(aclGrant(
                             new GrantTarget(database, null, null, null),
-                            rows.getString(1), rows.getString(2),
-                            rows.getBoolean(3)
+                            rows.getString(1),
+                            rows.getString(2),
+                            rows.getBoolean(3),
+                            rows.getString(4),
+                            rows.getBoolean(5),
+                            rows.getBoolean(6)
                     ));
                 }
             }
             try (ResultSet rows = statement.executeQuery(SCHEMA_GRANTS)) {
                 while (rows.next()) {
-                    result.add(grant(
+                    result.add(aclGrant(
                             new GrantTarget(database, rows.getString(1), null, null),
-                            rows.getString(2), rows.getString(3),
-                            rows.getBoolean(4)
+                            rows.getString(2),
+                            rows.getString(3),
+                            rows.getBoolean(4),
+                            rows.getString(5),
+                            rows.getBoolean(6),
+                            rows.getBoolean(7)
                     ));
                 }
             }
             try (ResultSet rows = statement.executeQuery(TABLE_GRANTS)) {
                 while (rows.next()) {
-                    result.add(grant(
+                    result.add(aclGrant(
                             new GrantTarget(
                                     database,
                                     rows.getString(1),
                                     rows.getString(2),
                                     null
                             ),
-                            rows.getString(3), rows.getString(4),
-                            rows.getBoolean(5)
+                            rows.getString(3),
+                            rows.getString(4),
+                            rows.getBoolean(5),
+                            rows.getString(6),
+                            rows.getBoolean(7),
+                            rows.getBoolean(8)
                     ));
                 }
             }
             try (ResultSet rows = statement.executeQuery(COLUMN_GRANTS)) {
                 while (rows.next()) {
-                    result.add(grant(
+                    result.add(aclGrant(
                             new GrantTarget(
                                     database,
                                     rows.getString(1),
                                     rows.getString(2),
                                     rows.getString(3)
                             ),
-                            rows.getString(4), rows.getString(5),
-                            rows.getBoolean(6)
+                            rows.getString(4),
+                            rows.getString(5),
+                            rows.getBoolean(6),
+                            rows.getString(7),
+                            rows.getBoolean(8),
+                            rows.getBoolean(9)
                     ));
                 }
             }
             try (ResultSet rows = statement.executeQuery(SEQUENCE_GRANTS)) {
                 while (rows.next()) {
-                    result.add(grant(
+                    result.add(aclGrant(
                             new GrantTarget(
                                     database,
                                     rows.getString(1),
@@ -490,16 +969,18 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                                     null,
                                     rows.getString(2)
                             ),
-                            rows.getString(3), rows.getString(4),
-                            rows.getBoolean(5)
+                            rows.getString(3),
+                            rows.getString(4),
+                            rows.getBoolean(5),
+                            rows.getString(6),
+                            rows.getBoolean(7),
+                            rows.getBoolean(8)
                     ));
                 }
             }
             try (ResultSet rows = statement.executeQuery(FUNCTION_GRANTS)) {
                 while (rows.next()) {
-                    String name = rows.getString(2);
-                    String arguments = rows.getString(3);
-                    result.add(grant(
+                    result.add(aclGrant(
                             new GrantTarget(
                                     database,
                                     rows.getString(1),
@@ -507,21 +988,23 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                                     null,
                                     null,
                                     RoutineSignature.parse(
-                                            quoteIdentifier(name)
-                                                    + "(" + arguments + ")"
+                                            quoteIdentifier(rows.getString(2))
+                                                    + "(" + rows.getString(3) + ")"
                                     ),
                                     null
                             ),
-                            rows.getString(4), rows.getString(5),
-                            rows.getBoolean(6)
+                            rows.getString(4),
+                            rows.getString(5),
+                            rows.getBoolean(6),
+                            rows.getString(7),
+                            rows.getBoolean(8),
+                            rows.getBoolean(9)
                     ));
                 }
             }
             try (ResultSet rows = statement.executeQuery(PROCEDURE_GRANTS)) {
                 while (rows.next()) {
-                    String name = rows.getString(2);
-                    String arguments = rows.getString(3);
-                    result.add(grant(
+                    result.add(aclGrant(
                             new GrantTarget(
                                     database,
                                     rows.getString(1),
@@ -530,12 +1013,16 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                                     null,
                                     null,
                                     RoutineSignature.parse(
-                                            quoteIdentifier(name)
-                                                    + "(" + arguments + ")"
+                                            quoteIdentifier(rows.getString(2))
+                                                    + "(" + rows.getString(3) + ")"
                                     )
                             ),
-                            rows.getString(4), rows.getString(5),
-                            rows.getBoolean(6)
+                            rows.getString(4),
+                            rows.getString(5),
+                            rows.getBoolean(6),
+                            rows.getString(7),
+                            rows.getBoolean(8),
+                            rows.getBoolean(9)
                     ));
                 }
             }
@@ -543,25 +1030,98 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         return Set.copyOf(result);
     }
 
-    private static Grant grant(
+    private Set<AclDefaultPrivilege> loadAclDefaultPrivileges(
+            Connection connection,
+            Set<DefaultPrivilegeScope> scopes
+    ) throws SQLException {
+        Set<AclDefaultPrivilege> result = new HashSet<>();
+        for (DefaultPrivilegeScope scope : scopes) {
+            try (PreparedStatement statement =
+                         connection.prepareStatement(DEFAULT_PRIVILEGE_ACL)) {
+                statement.setString(1, scope.creator());
+                statement.setString(2, scope.schema());
+                statement.setString(3, scope.type().catalogType());
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        String privilegeName = rows.getString(2);
+                        Privilege privilege;
+                        try {
+                            privilege = Privilege.parse(
+                                    scope.type().privilegeLevel(),
+                                    privilegeName
+                            );
+                        }
+                        catch (IllegalArgumentException e) {
+                            throw new SQLException(
+                                    "Unsupported PostgreSQL default ACL "
+                                            + "privilege: " + privilegeName,
+                                    e
+                            );
+                        }
+                        result.add(new AclDefaultPrivilege(
+                                new DefaultPrivilegeGrant(
+                                        scope,
+                                        rows.getString(1),
+                                        privilege
+                                ),
+                                rows.getString(4),
+                                rows.getBoolean(3),
+                                rows.getBoolean(5)
+                        ));
+                    }
+                }
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    private boolean isManagedDefaultPrivilege(
+            AclDefaultPrivilege acl,
+            String database
+    ) throws SQLException {
+        if (acl.granteeIsOwner()) {
+            return false;
+        }
+        if (config.reconciliationMode()
+                == PostgreSqlReconciliationMode.AUTHORITATIVE) {
+            return true;
+        }
+        DefaultPrivilegeGrant grant = acl.grant();
+        if (!config.username().equals(acl.grantor())
+                || config.username().equals(grant.role())
+                || "PUBLIC".equals(grant.role())) {
+            return false;
+        }
+        if (acl.grantable()) {
+            throw new SQLException(
+                    "PACT grantor has a grant-option default privilege in "
+                            + "database '" + database + "'; grant options are "
+                            + "outside the managed contract"
+            );
+        }
+        return true;
+    }
+
+    private static AclGrant aclGrant(
             GrantTarget target,
             String role,
             String privilege,
-            boolean grantable
+            boolean grantable,
+            String grantor,
+            boolean grantorIsOwner,
+            boolean granteeIsOwner
     ) throws SQLException {
-        if (grantable) {
-            throw new SQLException(
-                    "PACT grantor has a grant-option privilege on "
-                            + target.level().key() + " in database '"
-                            + target.database()
-                            + "'; grant options are outside the managed contract"
-            );
-        }
         try {
-            return new Grant(
-                    target,
-                    role,
-                    Privilege.parse(target.level(), privilege)
+            return new AclGrant(
+                    new Grant(
+                            target,
+                            role,
+                            Privilege.parse(target.level(), privilege)
+                    ),
+                    grantor,
+                    grantable,
+                    grantorIsOwner,
+                    granteeIsOwner
             );
         }
         catch (IllegalArgumentException e) {
@@ -571,6 +1131,23 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         }
     }
 
+    private boolean isPreservedDefaultPublicAcl(AclGrant acl) {
+        if (!config.preserveDefaultPublicPrivileges()
+                || !acl.grantorIsOwner()
+                || acl.grantable()
+                || !"PUBLIC".equals(acl.grant().role())) {
+            return false;
+        }
+        Grant grant = acl.grant();
+        return switch (grant.target().level()) {
+            case DATABASE -> grant.privilege() == Privilege.CONNECT
+                    || grant.privilege() == Privilege.TEMPORARY;
+            case FUNCTION, PROCEDURE ->
+                    grant.privilege() == Privilege.EXECUTE;
+            default -> false;
+        };
+    }
+
     private Set<Grant> expand(
             Connection connection,
             String database,
@@ -578,88 +1155,142 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     ) throws SQLException {
         Set<Grant> result = new HashSet<>();
         for (Grant grant : grants) {
-            GrantTarget target = grant.target();
-            if (target.level() == GrantLevel.FUNCTION
-                    || target.level() == GrantLevel.PROCEDURE) {
-                boolean procedure = target.level() == GrantLevel.PROCEDURE;
-                for (String schema : names(target.schema(),
-                        () -> listSchemas(connection))) {
-                    Grant schemaGrant = new Grant(
-                            new GrantTarget(
-                                    target.database(),
-                                    schema,
-                                    null,
-                                    null,
-                                    null,
-                                    procedure ? null : target.function(),
-                                    procedure ? target.procedure() : null
-                            ),
-                            grant.role(),
-                            grant.privilege()
-                    );
-                    result.add(resolveRoutine(connection, schemaGrant));
-                }
-                continue;
+            if (grant.target().level() == GrantLevel.FUNCTION
+                    || grant.target().level() == GrantLevel.PROCEDURE) {
+                result.add(resolveRoutine(connection, grant));
             }
-            if (!target.hasWildcard()) {
+            else {
                 result.add(grant);
+            }
+        }
+        return result;
+    }
+
+    private Set<Grant> expandDefaultPrivileges(
+            Connection connection,
+            String database,
+            Set<DefaultPrivilegeGrant> defaults
+    ) throws SQLException {
+        Set<Grant> result = new HashSet<>();
+        for (DefaultPrivilegeGrant defaultGrant : defaults) {
+            DefaultPrivilegeScope scope = defaultGrant.scope();
+            if (!database.equals(scope.database())) {
                 continue;
             }
-            for (String schema : names(target.schema(),
-                    () -> listSchemas(connection))) {
-                switch (target.level()) {
-                    case DATABASE -> result.add(grant);
-                    case SCHEMA -> result.add(new Grant(
-                            new GrantTarget(database, schema, null, null),
-                            grant.role(),
-                            grant.privilege()
-                    ));
-                    case TABLE -> {
-                        for (String table : names(target.table(),
-                                () -> listTables(connection, schema))) {
+            switch (scope.type()) {
+                case TABLES -> {
+                    for (OwnedObject object : listOwnedObjects(
+                            connection, LIST_TABLES, scope.schema())) {
+                        if (scope.creator().equals(object.owner())) {
                             result.add(new Grant(
                                     new GrantTarget(
-                                            database, schema, table, null),
-                                    grant.role(),
-                                    grant.privilege()
+                                            database, scope.schema(),
+                                            object.name(), null
+                                    ),
+                                    defaultGrant.role(),
+                                    defaultGrant.privilege()
                             ));
                         }
                     }
-                    case COLUMN -> {
-                        for (String table : names(target.table(),
-                                () -> listTables(connection, schema))) {
-                            for (String column : names(target.column(),
-                                    () -> listColumns(connection, schema, table))) {
-                                result.add(new Grant(
-                                        new GrantTarget(
-                                                database, schema, table, column),
-                                        grant.role(),
-                                        grant.privilege()
-                                ));
-                            }
-                        }
-                    }
-                    case SEQUENCE -> {
-                        for (String sequence : names(target.sequence(),
-                                () -> listSequences(connection, schema))) {
+                }
+                case SEQUENCES -> {
+                    for (OwnedObject object : listOwnedObjects(
+                            connection, LIST_SEQUENCES, scope.schema())) {
+                        if (scope.creator().equals(object.owner())) {
                             result.add(new Grant(
                                     new GrantTarget(
-                                            database, schema, null, null, sequence),
-                                    grant.role(),
-                                    grant.privilege()
+                                            database, scope.schema(), null,
+                                            null, object.name()
+                                    ),
+                                    defaultGrant.role(),
+                                    defaultGrant.privilege()
                             ));
                         }
                     }
-                    case FUNCTION -> throw new IllegalStateException(
-                            "Routine grants must be resolved before wildcard expansion"
-                    );
-                    case PROCEDURE -> throw new IllegalStateException(
-                            "Routine grants must be resolved before wildcard expansion"
-                    );
+                }
+                case ROUTINES -> {
+                    for (RoutineObject object
+                            : listOwnedRoutines(connection, scope.schema())) {
+                        if (scope.creator().equals(object.owner())) {
+                            RoutineSignature signature =
+                                    RoutineSignature.parse(
+                                            quoteIdentifier(object.name())
+                                                    + "(" + object.arguments()
+                                                    + ")"
+                                    );
+                            boolean procedure = "p".equals(object.kind());
+                            result.add(new Grant(
+                                    new GrantTarget(
+                                            database,
+                                            scope.schema(),
+                                            null,
+                                            null,
+                                            null,
+                                            procedure ? null : signature,
+                                            procedure ? signature : null
+                                    ),
+                                    defaultGrant.role(),
+                                    defaultGrant.privilege()
+                            ));
+                        }
+                    }
                 }
             }
         }
         return result;
+    }
+
+    private List<OwnedObject> listOwnedObjects(
+            Connection connection,
+            String sql,
+            String schema
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, schema);
+            try (ResultSet rows = statement.executeQuery()) {
+                List<OwnedObject> result = new ArrayList<>();
+                while (rows.next()) {
+                    result.add(new OwnedObject(
+                            rows.getString(1),
+                            rows.getString(2)
+                    ));
+                }
+                return result;
+            }
+        }
+    }
+
+    private List<RoutineObject> listOwnedRoutines(
+            Connection connection,
+            String schema
+    ) throws SQLException {
+        try (PreparedStatement statement =
+                     connection.prepareStatement(LIST_ROUTINES)) {
+            statement.setString(1, schema);
+            try (ResultSet rows = statement.executeQuery()) {
+                List<RoutineObject> result = new ArrayList<>();
+                while (rows.next()) {
+                    result.add(new RoutineObject(
+                            rows.getString(1),
+                            rows.getString(2),
+                            rows.getString(3),
+                            rows.getString(4)
+                    ));
+                }
+                return result;
+            }
+        }
+    }
+
+    private record OwnedObject(String name, String owner) {
+    }
+
+    private record RoutineObject(
+            String name,
+            String arguments,
+            String kind,
+            String owner
+    ) {
     }
 
     private Grant resolveRoutine(Connection connection, Grant grant)
@@ -728,63 +1359,6 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         }
     }
 
-    private interface Lister {
-        List<String> list() throws SQLException;
-    }
-
-    private static List<String> names(String value, Lister lister)
-            throws SQLException {
-        if (value == null) {
-            return Collections.singletonList(null);
-        }
-        if (GrantTarget.WILDCARD.equals(value)) {
-            return lister.list();
-        }
-        return List.of(value);
-    }
-
-    private List<String> listSchemas(Connection connection)
-            throws SQLException {
-        return query(connection, LIST_SCHEMAS);
-    }
-
-    private List<String> listTables(Connection connection, String schema)
-            throws SQLException {
-        return query(connection, LIST_TABLES, schema);
-    }
-
-    private List<String> listColumns(
-            Connection connection,
-            String schema,
-            String table
-    ) throws SQLException {
-        return query(connection, LIST_COLUMNS, schema, table);
-    }
-
-    private List<String> listSequences(Connection connection, String schema)
-            throws SQLException {
-        return query(connection, LIST_SEQUENCES, schema);
-    }
-
-    private static List<String> query(
-            Connection connection,
-            String sql,
-            String... parameters
-    ) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            for (int i = 0; i < parameters.length; i++) {
-                statement.setString(i + 1, parameters[i]);
-            }
-            try (ResultSet rows = statement.executeQuery()) {
-                List<String> result = new ArrayList<>();
-                while (rows.next()) {
-                    result.add(rows.getString(1));
-                }
-                return result;
-            }
-        }
-    }
-
     private void execute(Connection connection, String operation, Grant grant)
             throws SQLException {
         try (Statement statement = connection.createStatement()) {
@@ -822,7 +1396,21 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         };
         return operation + " " + subject
                 + ("GRANT".equals(operation) ? " TO " : " FROM ")
-                + quoteIdentifier(grant.role());
+                + grantee(grant.role());
+    }
+
+    private static String revokeStatement(
+            Grant grant,
+            boolean grantOptionOnly
+    ) {
+        String revoke = statement("REVOKE", grant);
+        return grantOptionOnly
+                ? revoke.replaceFirst("^REVOKE ", "REVOKE GRANT OPTION FOR ")
+                : revoke;
+    }
+
+    private static String grantee(String role) {
+        return "PUBLIC".equals(role) ? "PUBLIC" : quoteIdentifier(role);
     }
 
     static String quoteIdentifier(String identifier) {

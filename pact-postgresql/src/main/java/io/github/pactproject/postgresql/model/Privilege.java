@@ -16,6 +16,7 @@ public enum Privilege {
     DELETE(GrantLevel.TABLE),
     TRUNCATE(GrantLevel.TABLE),
     TRIGGER(GrantLevel.TABLE),
+    MAINTAIN(GrantLevel.TABLE),
     EXECUTE(GrantLevel.FUNCTION, GrantLevel.PROCEDURE);
 
     private final Set<GrantLevel> levels;

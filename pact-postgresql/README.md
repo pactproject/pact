@@ -14,7 +14,7 @@ hierarchy and the keys of `permissions` are levels of that path:
 | --- | --- | --- |
 | `database` | `database` | `CONNECT`, `CREATE`, `TEMPORARY` (`TEMP`) |
 | `schema` | `schema` | `USAGE`, `CREATE` |
-| `table` | `table` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` |
+| `table` | `table` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN` |
 | `column` | `column` | `SELECT`, `INSERT`, `UPDATE`, `REFERENCES` |
 | `sequence` | `sequence` | `USAGE`, `SELECT`, `UPDATE` |
 | `function` | `function` | `EXECUTE` |
@@ -40,35 +40,152 @@ hierarchy and the keys of `permissions` are levels of that path:
   its privileges along the ancestor path to that level. A single access can
   therefore carry permissions on the `table → column`, `sequence`,
   `function` and `procedure` branches.
-- `schema`, `table`, `column` and `sequence` accept `*`, meaning every
-  existing object at that level (system schemas `pg_*` and
-  `information_schema` are excluded; tables include views, materialized
-  views, partitioned and foreign tables). `database` cannot be `*`.
+- Targets are exact: wildcard targets such as `schema: "*"` or `table: "*"`
+  are not supported.
 - A privilege on the wrong level (for example `SELECT` on `database`) fails
   validation.
 
-Read everything in a database:
+## Default privileges
+
+Use `defaultPrivileges` on a database-and-schema target instead of a wildcard.
+It configures native PostgreSQL default ACLs for objects subsequently created
+by the declared `creator`, and applies the same privileges to existing objects
+in that schema that are owned by that creator:
 
 ```yaml
 resources:
   - analytics-db:
       database: analytics
-      schema: "*"
-      table: "*"
-      sequence: "*"
+      schema: sales
     access:
       - users:
-          - alice
+          - app
+        defaultPrivileges:
+          creator: sales_migrator
+          permissions:
+            table:
+              - SELECT
+              - UPDATE
+            sequence:
+              - USAGE
+            function:
+              - EXECUTE
+```
+
+`users`/`Access.principal` is the grantee; `creator` is the PostgreSQL role
+that creates objects and owns the default-privilege rule. PostgreSQL only
+applies default ACLs to objects created by that role (or a role it has assumed).
+Existing objects owned by other roles are unchanged. In authoritative mode,
+PACT may use `PUBLIC` as the grantee.
+
+Supported default-privilege object types are `table`, `sequence`, `function`
+and `procedure` (functions and procedures use PostgreSQL's shared `ROUTINES`
+default-ACL category). Database-, schema- and column-level defaults are not
+available. PostgreSQL global defaults remain independent of schema-specific
+defaults configured by PACT.
+
+An exact-object `permissions` declaration for the same grantee and object type
+overrides that object's default-derived privileges. For example, this grants
+only `SELECT` on one table even when the schema rule also grants `UPDATE`:
+
+```yaml
+resources:
+  - analytics-db:
+      database: analytics
+      schema: sales
+      table: archived_orders
+    access:
+      - users:
+          - app
+        permissions:
+          table:
+            - SELECT
+```
+
+### Application database with a developer and analysts
+
+This example gives the application permission to create schemas, gives the
+developer read/write access to application objects, and gives two analysts
+read-only access. The analysts may also create their own schemas:
+
+```yaml
+resources:
+  - app-postgres:
+      database: appdb
+    access:
+      - users:
+          - app
         permissions:
           database:
             - CONNECT
+            - CREATE
+      - users:
+          - developer
+        permissions:
+          database:
+            - CONNECT
+      - users:
+          - analyst_a
+          - analyst_b
+        permissions:
+          database:
+            - CONNECT
+            - CREATE
+
+  - app-postgres:
+      database: appdb
+      schema: app_data
+    access:
+      - users:
+          - developer
+        permissions:
           schema:
             - USAGE
-          table:
-            - SELECT
-          sequence:
+        defaultPrivileges:
+          creator: app
+          permissions:
+            table:
+              - SELECT
+              - INSERT
+              - UPDATE
+              - DELETE
+            sequence:
+              - USAGE
+              - SELECT
+              - UPDATE
+      - users:
+          - analyst_a
+          - analyst_b
+        permissions:
+          schema:
             - USAGE
+        defaultPrivileges:
+          creator: app
+          permissions:
+            table:
+              - SELECT
+            sequence:
+              - SELECT
 ```
+
+The `appdb` database and the roles must exist; role identities can be declared
+separately in `DataAccess.spec.identities`. The `app` role must own `app_data`
+and create its objects as `app` for the schema's default privileges to apply.
+PACT applies those defaults to existing objects in `app_data` owned by `app`
+and to future objects there created by `app`.
+
+The `CREATE` database privilege lets each analyst create schemas with any name
+in `appdb`; PostgreSQL cannot limit it to a personal schema name. An analyst
+owns a schema they create and can manage or drop it. In contrast, analysts
+receive only `USAGE` on `app_data`, so they cannot create objects there or drop
+that schema; its owner (`app`) or a superuser controls it. The developer does
+not receive database `CREATE`.
+
+`app_data` must exist before this full state is reconciled because PostgreSQL
+requires the schema for schema-scoped `ALTER DEFAULT PRIVILEGES`. For initial
+setup, first grant database access and `CREATE` to `app`, let the application
+create `app_data`, then apply the complete state above. PACT does not
+automatically apply this schema policy to arbitrary schemas created later.
 
 Read-write on one table and one column:
 
@@ -124,11 +241,8 @@ resources:
             - EXECUTE
 ```
 
-`*` is expanded when PACT reconciles, so tables, columns and sequences created
-later are not covered until the next reconciliation of that resource.
-PostgreSQL's `ALTER DEFAULT PRIVILEGES` is not managed. Column-level and
-table-level grants are independent; a table-level privilege already covers
-all columns.
+Column-level and table-level grants are independent; a table-level privilege
+already covers all columns.
 
 ## Configuration
 
@@ -144,6 +258,8 @@ backends:
       jdbc-url: jdbc:postgresql://postgres.example:5432/postgres
       username: pact_grant_manager
       password: <injected-from-a-secret>
+      reconciliation-mode: grantor
+      preserve-default-public-privileges: true
 
 stateProvider:
   type: kubernetes
@@ -163,18 +279,25 @@ resources:
 ```
 
 The PostgreSQL backend factory is registered with Java `ServiceLoader`.
-Settings `jdbc-url`, `username`, and `password` are required. The JDBC URL
-identifies the cluster; PACT replaces its database part with each managed
-database, because object-level ACLs live in per-database catalogs. The
-grantor therefore needs `CONNECT` on every managed database. Object names are
-passed to `GRANT`/`REVOKE` as quoted SQL identifiers.
+Settings `jdbc-url`, `username`, and `password` are required.
+`reconciliation-mode` is `grantor` (the default) or `authoritative`.
+`preserve-default-public-privileges` defaults to `true`; authoritative mode
+uses it to preserve PostgreSQL's built-in `PUBLIC` defaults for database
+`CONNECT`/`TEMPORARY` and routine `EXECUTE`. Set it to `false` when PACT should
+reconcile those privileges too. The JDBC URL identifies the cluster; PACT
+replaces its database part with each managed database, because object-level
+ACLs live in per-database catalogs. Object names are passed to `GRANT`/`REVOKE`
+as quoted SQL identifiers.
 Inject credentials using the deployment's secret mechanism; do not commit
 real passwords to configuration. The plugin runtime needs pgJDBC
 (`org.postgresql:postgresql`) visible in the plugin class loader.
 
 Rules:
 
-- `Access.principal` is the name of an existing PostgreSQL role.
+- `Access.principal` is the name of an existing PostgreSQL role. In
+  authoritative mode, the exact subject `PUBLIC` maps to PostgreSQL's
+  special `PUBLIC` grantee; it is not a role name or an object wildcard. The
+  exact subject `PUBLIC` is reserved for this purpose.
 - `DataAccess.spec.identities` may declare roles for this backend. `ensure`
   defaults to `false`; when true, PACT creates a missing role with `LOGIN`.
   Existing roles must have `LOGIN` when PACT is asked to set a password; PACT
@@ -192,31 +315,103 @@ Rules:
 - Role password management is separate from the JDBC credentials PACT uses
   for its own connection to PostgreSQL.
 - `Resource.backendId` selects the configured PostgreSQL connection.
-- `WITH GRANT OPTION`, `PUBLIC`, role membership, object ownership,
-  default privileges and row-level security are out of scope.
+- PACT declarations do not express `WITH GRANT OPTION`; authoritative mode
+  removes it from managed grants. Role membership, object ownership,
+  `ALTER DEFAULT PRIVILEGES` and row-level security remain out of scope.
 - Privilege names are case-insensitive; unknown privilege or target names
   fail validation rather than being interpolated into SQL.
 - An access with no permissions expresses no grants for that role/target;
-  previously PACT-managed grants in scope are revoked.
+  previously managed grants in scope are revoked according to the configured
+  reconciliation mode.
 
 ## Grant ownership contract
 
-The PostgreSQL login configured for this backend is the PACT grantor. Its
-database ACL entries (the PostgreSQL ACL `grantor`) are the ownership boundary:
-the backend reads only grants issued by `current_user`, never manages `PUBLIC`
-or grants issued by another role, and reconciles PACT's direct database grants
-to the desired set. The grantor identity should be dedicated to PACT and must
-not be used for manual grants or shared with another independently
-reconciling PACT backend for overlapping databases. Otherwise those grants
-cannot be distinguished from PACT-owned state.
+`reconciliation-mode: grantor` preserves the original behavior. PACT reads and
+reconciles only direct ACL entries issued by the configured login, excluding
+`PUBLIC` and grants from other grantors. That login needs enough authority to
+grant/revoke the configured privileges and connect to managed databases. Use a
+dedicated login; do not share it with manual grants or another independently
+reconciling backend over overlapping databases.
 
-The grantor must already have sufficient authority to grant/revoke the
-configured privileges and connect to every managed database. The
-grants reconciler does not create databases or grant options. If it encounters
-a grant-option ACL entry from its own grantor, reconciliation fails closed
-rather than taking ownership of a capability outside the contract. A revoke
-that would invalidate dependent delegated grants can fail under PostgreSQL's
-default `RESTRICT`; PACT does not use `CASCADE`.
+`reconciliation-mode: authoritative` is an explicit, destructive mode for
+making PACT the source of truth for direct object ACLs. It requires the
+configured login to be a PostgreSQL superuser. Within each database in scope,
+PACT compares ACLs for all grantees, including `PUBLIC`, without treating the
+grantor as an ownership boundary. ACL grants absent from desired state are
+revoked; grant options are removed because PACT does not model them. PostgreSQL
+requires a revoke to run as the grantor recorded on that ACL, so PACT temporarily
+`SET ROLE`s to each grantor. These revokes use `CASCADE`; grants removed through
+grant-option dependencies are then restored only when present in the desired
+state. Object-owner privileges are not revoked.
+
+Authoritative mode does not manage role membership, object ownership,
+`ALTER DEFAULT PRIVILEGES`, row-level security, or database/schema/object
+creation. Those paths can still confer access independently of the direct ACLs
+PACT reconciles. PACT also reconciles only databases named by the previous or
+desired state; ensure every database to be managed is represented in that
+state. Use a complete desired state and pilot the mode before enabling it on a
+production scope.
+
+## Provisioning the grant-manager login
+
+For a grants-only backend, use a dedicated login with `CONNECT` to each managed
+database and `WITH GRANT OPTION` on only the privileges PACT is expected to
+delegate on pre-existing objects. The owner (or a role already entitled to
+delegate those privileges) provisions the grant options; PACT does not create
+them. For example, if PACT will give an application `CONNECT` to `analytics`,
+`USAGE` on `sales`, and `SELECT` on `sales.orders`:
+
+```sql
+-- Run as a PostgreSQL administrator.
+CREATE ROLE pact_grant_manager LOGIN;
+```
+
+Set the login password securely in `psql` with `\password pact_grant_manager`,
+then have the relevant database and object owners provision the exact
+delegated privileges:
+
+```sql
+GRANT CONNECT ON DATABASE analytics
+    TO pact_grant_manager WITH GRANT OPTION;
+
+GRANT USAGE ON SCHEMA sales
+    TO pact_grant_manager WITH GRANT OPTION;
+
+GRANT SELECT ON TABLE sales.orders
+    TO pact_grant_manager WITH GRANT OPTION;
+```
+
+Repeat this for each managed database, object and privilege that appears in
+PACT's desired state. The `WITH GRANT OPTION` must cover the corresponding
+privilege at its actual target level:
+
+| PACT target level | Privileges the grant-manager may need to delegate |
+| --- | --- |
+| `database` | `CONNECT`, `CREATE`, `TEMPORARY` |
+| `schema` | `USAGE`, `CREATE` |
+| `table` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN` |
+| `column` | `SELECT`, `INSERT`, `UPDATE`, `REFERENCES` on the named columns |
+| `sequence` | `USAGE`, `SELECT`, `UPDATE` |
+| `function`, `procedure` | `EXECUTE` on the exact routine signature |
+
+Only provision options for privileges PACT actually needs to issue. A privilege
+granted `WITH GRANT OPTION` is also a privilege the grant-manager itself holds;
+for example, delegating schema `CREATE` also lets the grant-manager create
+objects there. Do not grant all options indiscriminately.
+
+In the grants-only setup, the login does not need `SUPERUSER`, `CREATEDB`, or
+`CREATEROLE`; target roles and objects must already exist. PostgreSQL may accept
+a `GRANT` from a login that lacks the needed grant option but emit a “no
+privileges were granted” warning and make no ACL change. PACT may not report
+that warning as an error, so a successful reconciliation alone is not proof
+that the recipient received access.
+
+The provisioning is per existing object. Newly created objects need their
+grant options provisioned by their owner before PACT can manage grants on them;
+PACT does not manage `ALTER DEFAULT PRIVILEGES`. The live integration test
+exercises a non-owner grant-manager with no elevated role attributes on
+PostgreSQL 18. Managed PostgreSQL products can impose additional restrictions
+and should be tested separately.
 
 Only databases named by the previous or desired PACT state are in a
 reconciliation's scope; within such a database all schemas, tables and
@@ -390,13 +585,12 @@ RLS support remains a design proposal and is not implemented.
 The backend compiles `PactState` into desired direct grants, reads actual
 grants, calculates a normalized diff, and applies `GRANT`/`REVOKE` statements
 in a JDBC transaction. A prepared `BackendTransaction` snapshots the actual
-PACT-owned grants in scope to compensate if another backend fails during a
-PACT reconciliation. The configured database login is the grantor identity:
-the backend reads and reconciles only ACL entries issued by that login. It does
-not infer ownership of privileges from `PUBLIC`, role membership, or object
-ownership. Database and role identifiers are quoted as SQL identifiers with
-embedded quotes escaped; they are not interpolated as unquoted SQL. Passwords
-and credential-bearing JDBC URLs are not logged.
+grants in scope to compensate if another backend fails during a PACT
+reconciliation. In grantor mode the configured login is the ownership
+boundary; in authoritative mode ACLs are reconciled regardless of grantor.
+Database and role identifiers are quoted as SQL identifiers with embedded
+quotes escaped; they are not interpolated as unquoted SQL. Passwords and
+credential-bearing JDBC URLs are not logged.
 
 PostgreSQL roles are cluster-wide, while privileges name objects inside one
 database of that cluster. Deployment-specific constraints
@@ -427,7 +621,10 @@ behavior, and role identity reconciliation. Its opt-in
 `PostgreSqlLiveIntegrationTest` creates a uniquely named temporary database
 and role, verifies direct grants across PostgreSQL object levels, updates
 grants and the role password, tests login with the new password, and removes
-the temporary database and role. Run it only against a disposable cluster
-with a test login that has `CREATEDB` and `CREATEROLE`; see
+the temporary database and role. It also verifies grantor-mode reconciliation
+through a delegated non-superuser login and authoritative-mode cleanup across
+grantors, grant-option removal, the `PUBLIC` subject, and preservation or
+revocation of built-in `PUBLIC` defaults. Run it only against a disposable
+cluster with a test login that has `CREATEDB` and `CREATEROLE`; see
 [`INTEGRATION_TESTS.md`](../INTEGRATION_TESTS.md). The local Compose `tests`
 profile runs this test against its disposable PostgreSQL service.

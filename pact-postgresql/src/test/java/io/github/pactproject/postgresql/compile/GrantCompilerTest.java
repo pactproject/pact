@@ -4,6 +4,10 @@ import io.github.pactproject.api.Access;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.Resource;
 import io.github.pactproject.api.value.Value;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeGrant;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeType;
 import io.github.pactproject.postgresql.model.Grant;
 import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.RoutineSignature;
@@ -193,20 +197,116 @@ class GrantCompilerTest {
     }
 
     @Test
-    void keepsWildcardTargets() {
-        PactState state = state(access(
+    void compilesDefaultPrivilegesAndSpecificOverrides() {
+        Access defaults = new Access(
                 "alice",
-                Map.of("database", "analytics", "schema", "*", "table", "*"),
-                Map.of("table", Set.of("SELECT"))
-        ));
-
-        assertEquals(
-                Set.of(new Grant(
-                        new GrantTarget("analytics", "*", "*", null),
-                        "alice",
-                        Privilege.SELECT
+                new Resource("postgres", Map.of(
+                        "database", "analytics",
+                        "schema", "sales"
                 )),
-                GrantCompiler.compile(state, "postgres")
+                Map.of(
+                        "permissions", permissions(Map.of(
+                                "schema", Set.of("USAGE")
+                        )),
+                        "defaultPrivileges", Value.object(Map.of(
+                                "creator", Value.string("sales_migrator"),
+                                "permissions", permissions(Map.of(
+                                        "table", Set.of("SELECT", "UPDATE"),
+                                        "sequence", Set.of("USAGE", "SELECT"),
+                                        "function", Set.of("EXECUTE")
+                                ))
+                        ))
+                )
+        );
+        Access tableOverride = access(
+                "alice",
+                Map.of(
+                        "database", "analytics",
+                        "schema", "sales",
+                        "table", "private_orders"
+                ),
+                Map.of("table", Set.of("SELECT"))
+        );
+
+        var compiled = GrantCompiler.compileState(
+                state(defaults, tableOverride),
+                "postgres"
+        );
+        DefaultPrivilegeScope tables = new DefaultPrivilegeScope(
+                "analytics", "sales", "sales_migrator",
+                DefaultPrivilegeType.TABLES
+        );
+        assertEquals(
+                Set.of(
+                        new Grant(
+                                new GrantTarget("analytics", "sales", null, null),
+                                "alice", Privilege.USAGE
+                        ),
+                        new Grant(
+                                new GrantTarget(
+                                        "analytics", "sales",
+                                        "private_orders", null
+                                ),
+                                "alice", Privilege.SELECT
+                        )
+                ),
+                compiled.grants()
+        );
+        assertEquals(
+                Set.of(
+                        new DefaultPrivilegeGrant(
+                                tables, "alice", Privilege.SELECT
+                        ),
+                        new DefaultPrivilegeGrant(
+                                tables, "alice", Privilege.UPDATE
+                        ),
+                        new DefaultPrivilegeGrant(
+                                new DefaultPrivilegeScope(
+                                        "analytics", "sales", "sales_migrator",
+                                        DefaultPrivilegeType.SEQUENCES
+                                ),
+                                "alice", Privilege.USAGE
+                        ),
+                        new DefaultPrivilegeGrant(
+                                new DefaultPrivilegeScope(
+                                        "analytics", "sales", "sales_migrator",
+                                        DefaultPrivilegeType.SEQUENCES
+                                ),
+                                "alice", Privilege.SELECT
+                        ),
+                        new DefaultPrivilegeGrant(
+                                new DefaultPrivilegeScope(
+                                        "analytics", "sales", "sales_migrator",
+                                        DefaultPrivilegeType.ROUTINES
+                                ),
+                                "alice", Privilege.EXECUTE
+                        )
+                ),
+                compiled.defaultPrivileges()
+        );
+        assertEquals(
+                Set.of(
+                        tables,
+                        new DefaultPrivilegeScope(
+                                "analytics", "sales", "sales_migrator",
+                                DefaultPrivilegeType.SEQUENCES
+                        ),
+                        new DefaultPrivilegeScope(
+                                "analytics", "sales", "sales_migrator",
+                                DefaultPrivilegeType.ROUTINES
+                        )
+                ),
+                compiled.defaultPrivilegeScopes()
+        );
+        assertEquals(
+                Set.of(new DefaultPrivilegeOverride(
+                        new GrantTarget(
+                                "analytics", "sales", "private_orders", null
+                        ),
+                        "alice",
+                        DefaultPrivilegeType.TABLES
+                )),
+                compiled.defaultPrivilegeOverrides()
         );
     }
 
@@ -275,6 +375,11 @@ class GrantCompilerTest {
         ));
         assertInvalid(access("alice", Map.of("database", "*"), none));
         assertInvalid(access(
+                "alice",
+                Map.of("database", "a", "schema", "*", "table", "*"),
+                Map.of("table", Set.of("SELECT"))
+        ));
+        assertInvalid(access(
                 "alice", Map.of("database", "a", "bucket", "b"), none));
     }
 
@@ -319,17 +424,18 @@ class GrantCompilerTest {
         return new Access(
                 role,
                 new Resource("postgres", target),
-                Map.of(
-                        "permissions",
-                        Value.object(permissions.entrySet().stream()
-                                .collect(Collectors.toMap(
-                                        Map.Entry::getKey,
-                                        entry -> Value.set(entry.getValue().stream()
-                                                .map(Value::string)
-                                                .collect(Collectors.toSet()))
-                                )))
-                )
+                Map.of("permissions", permissions(permissions))
         );
+    }
+
+    private static Value permissions(Map<String, Set<String>> values) {
+        return Value.object(values.entrySet().stream()
+                .collect(Collectors.toMap(
+                        Map.Entry::getKey,
+                        entry -> Value.set(entry.getValue().stream()
+                                .map(Value::string)
+                                .collect(Collectors.toSet()))
+                )));
     }
 
     private static PactState state(Access... accesses) {

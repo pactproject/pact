@@ -158,13 +158,13 @@ providers and backends as plugins. Mount a PACT YAML configuration file at
 secret mechanism rather than baking them into the image.
 
 GitHub Actions builds the image for pull requests and publishes it to GHCR
-when a version tag starting with `v` is pushed. For example, to publish and
-pull version `1.0.0`:
+when an image version tag is pushed. Prefix release tags with `image-v`; for
+example, to publish and pull image version `1.0.0`:
 
 ```shell
-git tag v1.0.0
-git push origin v1.0.0
-docker pull ghcr.io/pactproject/pact:v1.0.0
+git tag image-v1.0.0
+git push origin image-v1.0.0
+docker pull ghcr.io/pactproject/pact:1.0.0
 ```
 
 GHCR package visibility is managed in GitHub; make the package public there if
@@ -174,6 +174,25 @@ The Kubernetes state provider runs as a controller and watches `DataAccess`
 resources cluster-wide. It requires the corresponding CRD, status subresource,
 and RBAC; see [`pact-kubernetes/README.md`](pact-kubernetes/README.md) and the
 [PACT Helm chart](charts/pact).
+
+### Versioning
+
+The root Maven version identifies the PACT API, core, and application. Each
+backend/state-provider plugin has its own version in that module's `pom.xml`;
+plugin versions may advance without changing the root application version. The
+plugins still depend on the API version declared by `pact.api.version` in the
+root POM.
+
+The container image has its own release version, selected by the `image-vX.Y.Z`
+Git tag and published as image tag `X.Y.Z` (plus a commit-SHA tag). Each image
+contains the plugin JARs built from that source revision. Updating a plugin
+therefore requires publishing a new image version, but does not require
+advancing the root Maven/application version. Plugin JARs are not published
+independently.
+
+The Helm chart package version in `charts/pact/Chart.yaml` tracks the chart
+itself. Its `appVersion` and the default `image.tag` in
+`charts/pact/values.yaml` should identify the image version the chart deploys.
 
 ## Build
 

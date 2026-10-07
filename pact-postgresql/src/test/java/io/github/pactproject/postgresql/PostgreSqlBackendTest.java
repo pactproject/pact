@@ -10,6 +10,9 @@ import io.github.pactproject.api.exception.ValidationException;
 import io.github.pactproject.api.value.Value;
 import io.github.pactproject.postgresql.api.PostgreSqlClient;
 import io.github.pactproject.postgresql.api.PostgreSqlClientException;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeGrant;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
+import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.Grant;
 import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.Privilege;
@@ -198,6 +201,7 @@ class PostgreSqlBackendTest {
 
     private static final class FakeClient implements PostgreSqlClient {
         private final Set<Grant> actual = new HashSet<>();
+        private final Set<DefaultPrivilegeGrant> actualDefaults = new HashSet<>();
         private Set<Identity> desiredIdentities = Set.of();
         private final List<String> operations = new ArrayList<>();
         private boolean failOnRead;
@@ -215,6 +219,15 @@ class PostgreSqlBackendTest {
         }
 
         @Override
+        public Set<DefaultPrivilegeGrant> getManagedDefaultPrivileges(
+                Set<DefaultPrivilegeScope> scopes
+        ) {
+            return actualDefaults.stream()
+                    .filter(grant -> scopes.contains(grant.scope()))
+                    .collect(Collectors.toUnmodifiableSet());
+        }
+
+        @Override
         public void reconcileIdentities(
                 Set<Identity> previous,
                 Set<Identity> desired
@@ -227,11 +240,18 @@ class PostgreSqlBackendTest {
         @Override
         public void synchronize(
                 Set<String> databases,
-                Set<Grant> desired
+                Set<Grant> desired,
+                Set<DefaultPrivilegeGrant> desiredDefaults,
+                Set<DefaultPrivilegeScope> defaultScopes,
+                Set<DefaultPrivilegeOverride> overrides
         ) {
             operations.add("grants");
             actual.removeIf(grant -> databases.contains(grant.target().database()));
             actual.addAll(desired);
+            actualDefaults.removeIf(
+                    grant -> defaultScopes.contains(grant.scope())
+            );
+            actualDefaults.addAll(desiredDefaults);
         }
     }
 }
