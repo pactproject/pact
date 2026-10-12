@@ -229,8 +229,8 @@ public final class DataAccessController
     {
         long deadline = System.nanoTime()
                 + TimeUnit.SECONDS.toNanos(
-                        config.informerStartTimeoutSeconds()
-                );
+                config.informerStartTimeoutSeconds()
+        );
         while (!informer.hasSynced()) {
             if (System.nanoTime() >= deadline) {
                 throw new IllegalStateException(
@@ -360,9 +360,9 @@ public final class DataAccessController
                 : oldResource.getMetadata().getResourceVersion();
         return oldVersion != null
                 && java.util.Objects.equals(
-                        oldVersion,
-                        newResource.getMetadata().getResourceVersion()
-                );
+                oldVersion,
+                newResource.getMetadata().getResourceVersion()
+        );
     }
 
     private void handleDelete(GenericKubernetesResource resource)
@@ -657,18 +657,33 @@ public final class DataAccessController
 
     private PactState aggregateAppliedState()
     {
-        return aggregate(appliedResources);
+        return aggregate(appliedResources, false);
     }
 
     private PactState aggregate(
             Map<ResourceKey, AppliedResource> resources)
     {
+        return aggregate(resources, true);
+    }
+
+    private PactState aggregate(
+            Map<ResourceKey, AppliedResource> resources,
+            boolean resolveSecrets)
+    {
         Set<Access> accesses = new HashSet<>();
         Set<Identity> identities = new HashSet<>();
         Map<String, ResourceKey> identityOwners = new HashMap<>();
+
         resources.forEach((key, applied) -> {
-            accesses.addAll(applied.state().accesses());
-            for (Identity identity : applied.state().identities()) {
+            PactState state = resolveSecrets
+                    ? resolveCredentials(
+                    compiler.compile(List.of(applied.spec())),
+                    key.namespace())
+                    : applied.state();
+
+            accesses.addAll(state.accesses());
+
+            for (Identity identity : state.identities()) {
                 String identityKey = identity.backendId()
                         + "\u0000" + identity.principal();
                 ResourceKey previousOwner = identityOwners.putIfAbsent(
@@ -685,6 +700,7 @@ public final class DataAccessController
                 identities.add(identity);
             }
         });
+
         return new PactState(accesses, identities);
     }
 
@@ -743,6 +759,26 @@ public final class DataAccessController
             ));
         }
         return new PactState(state.accesses(), identities);
+    }
+
+    private Map<ResourceKey, AppliedResource> resolveAllCredentials(
+            Map<ResourceKey, AppliedResource> resources)
+    {
+        Map<ResourceKey, AppliedResource> result = new HashMap<>();
+
+        resources.forEach((key, resource) ->
+                result.put(
+                        key,
+                        new AppliedResource(
+                                resource.spec(),
+                                resolveCredentials(
+                                        compiler.compile(List.of(resource.spec())),
+                                        key.namespace())
+                        )
+                )
+        );
+
+        return result;
     }
 
     private String decodeSecret(
@@ -828,12 +864,12 @@ public final class DataAccessController
             identities.add(
                     identity.passwordSource() != null && version != null
                             ? identity.withPasswordVersion(
-                                    qualifiedSecretSource(
-                                            namespace,
-                                            identity.passwordSource()
-                                    ),
-                                    version
-                            )
+                            qualifiedSecretSource(
+                                    namespace,
+                                    identity.passwordSource()
+                            ),
+                            version
+                    )
                             : identity
             );
         }
@@ -1136,32 +1172,32 @@ public final class DataAccessController
         // Status writes during cleanup must not enqueue another cleanup pass.
         if (!isDeleting(oldResource)
                 || java.util.Objects.equals(
-                        oldResource.getAdditionalProperties().get("status"),
-                        newResource.getAdditionalProperties().get("status")
-                )
+                oldResource.getAdditionalProperties().get("status"),
+                newResource.getAdditionalProperties().get("status")
+        )
                 || !java.util.Objects.equals(
-                        oldResource.getMetadata().getDeletionTimestamp(),
-                        newResource.getMetadata().getDeletionTimestamp()
-                )
+                oldResource.getMetadata().getDeletionTimestamp(),
+                newResource.getMetadata().getDeletionTimestamp()
+        )
                 || !java.util.Objects.equals(
-                        oldResource.getMetadata().getGeneration(),
-                        newResource.getMetadata().getGeneration()
-                )
+                oldResource.getMetadata().getGeneration(),
+                newResource.getMetadata().getGeneration()
+        )
                 || !finalizers(oldResource).equals(finalizers(newResource))) {
             return false;
         }
         return java.util.Objects.equals(
-                        oldResource.getAdditionalProperties().get("spec"),
-                        newResource.getAdditionalProperties().get("spec")
-                )
+                oldResource.getAdditionalProperties().get("spec"),
+                newResource.getAdditionalProperties().get("spec")
+        )
                 && java.util.Objects.equals(
-                        oldResource.getMetadata().getLabels(),
-                        newResource.getMetadata().getLabels()
-                )
+                oldResource.getMetadata().getLabels(),
+                newResource.getMetadata().getLabels()
+        )
                 && java.util.Objects.equals(
-                        oldResource.getMetadata().getAnnotations(),
-                        newResource.getMetadata().getAnnotations()
-                );
+                oldResource.getMetadata().getAnnotations(),
+                newResource.getMetadata().getAnnotations()
+        );
     }
 
     private List<String> finalizers(GenericKubernetesResource resource)

@@ -599,6 +599,71 @@ class KubernetesStateProviderTest
         );
     }
 
+    @Test
+    void preservesIdentityCredentialsWhenAnotherDataAccessIsApplied()
+            throws Exception
+    {
+        var reconciler = new RecordingReconciler();
+        var provider = new KubernetesStateProvider(kubernetesClient);
+
+        createSecret(
+                "default",
+                "app-credentials",
+                "password",
+                "s3cret"
+        );
+
+        provider.start(reconciler);
+
+        createDataAccess(
+                "default",
+                "identity",
+                identitySpec(false)
+        );
+
+        awaitDataAccess(
+                "default",
+                "identity",
+                resource -> statusPhase(resource).equals("Ready")
+        );
+        awaitAppliedStateCount(reconciler, 1);
+
+        Identity initialIdentity = reconciler.appliedStates.getLast()
+                .identities()
+                .iterator()
+                .next();
+
+        assertEquals("s3cret", initialIdentity.password().reveal());
+
+        createDataAccess(
+                "default",
+                "registry",
+                registrySpec("alice", "read")
+        );
+
+        awaitDataAccess(
+                "default",
+                "registry",
+                resource -> statusPhase(resource).equals("Ready")
+        );
+        awaitAppliedStateCount(reconciler, 2);
+
+        PactState updatedState = reconciler.appliedStates.getLast();
+
+        assertEquals(1, updatedState.identities().size());
+
+        Identity updatedIdentity = updatedState.identities()
+                .iterator()
+                .next();
+
+        assertEquals("app", updatedIdentity.principal());
+        assertEquals("s3cret", updatedIdentity.password().reveal());
+
+        assertEquals(1, updatedState.accesses().size());
+
+        provider.close();
+    }
+
     private void createDataAccess(
             String namespace,
             String name,
