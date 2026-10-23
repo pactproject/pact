@@ -19,7 +19,7 @@ public final class ArtifactKeeperDiff {
             List<ActualArtifactKeeperPermission> actual,
             List<ArtifactKeeperPermission> desired
     ) {
-        Map<Key, ActualArtifactKeeperPermission> actualByKey =
+        Map<Key, List<ActualArtifactKeeperPermission>> actualByKey =
                 indexActual(actual);
 
         Map<Key, ArtifactKeeperPermission> desiredByKey =
@@ -31,27 +31,16 @@ public final class ArtifactKeeperDiff {
         for (Map.Entry<Key, ArtifactKeeperPermission> entry
                 : desiredByKey.entrySet()) {
 
-            ActualArtifactKeeperPermission actualPermission =
-                    actualByKey.get(entry.getKey());
-
-            if (actualPermission == null) {
-                create.add(entry.getValue());
-                continue;
-            }
-
-            if (!actualPermission.actions()
-                    .equals(entry.getValue().actions())) {
-
-                delete.add(actualPermission);
+            if (!actualByKey.containsKey(entry.getKey())) {
                 create.add(entry.getValue());
             }
         }
 
-        for (Map.Entry<Key, ActualArtifactKeeperPermission> entry
+        for (Map.Entry<Key, List<ActualArtifactKeeperPermission>> entry
                 : actualByKey.entrySet()) {
 
             if (!desiredByKey.containsKey(entry.getKey())) {
-                delete.add(entry.getValue());
+                delete.addAll(entry.getValue());
             }
         }
 
@@ -61,10 +50,10 @@ public final class ArtifactKeeperDiff {
         );
     }
 
-    private static Map<Key, ActualArtifactKeeperPermission> indexActual(
+    private static Map<Key, List<ActualArtifactKeeperPermission>> indexActual(
             List<ActualArtifactKeeperPermission> permissions
     ) {
-        Map<Key, ActualArtifactKeeperPermission> result = new HashMap<>();
+        Map<Key, List<ActualArtifactKeeperPermission>> result = new HashMap<>();
 
         for (ActualArtifactKeeperPermission permission : permissions) {
             Key key = new Key(
@@ -74,11 +63,9 @@ public final class ArtifactKeeperDiff {
                     sortedActions(permission.actions())
             );
 
-            result.merge(
-                    key,
-                    permission,
-                    ArtifactKeeperDiff::mergeActual
-            );
+            // Legacy and current wire types can normalize to the same logical
+            // grant. Keep every ID so revocation removes both physical rows.
+            result.computeIfAbsent(key, ignored -> new ArrayList<>()).add(permission);
         }
 
         return result;
@@ -105,19 +92,6 @@ public final class ArtifactKeeperDiff {
         }
 
         return result;
-    }
-
-    private static ActualArtifactKeeperPermission mergeActual(
-            ActualArtifactKeeperPermission first,
-            ActualArtifactKeeperPermission second
-    ) {
-        return new ActualArtifactKeeperPermission(
-                first.id(),
-                first.repository(),
-                first.principalType(),
-                first.username(),
-                union(first.actions(), second.actions())
-        );
     }
 
     private static ArtifactKeeperPermission mergeDesired(

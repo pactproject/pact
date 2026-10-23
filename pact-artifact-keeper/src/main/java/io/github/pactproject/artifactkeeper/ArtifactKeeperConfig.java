@@ -6,8 +6,13 @@ import java.util.Map;
 public record ArtifactKeeperConfig(
         URI url,
         String token,
-        int perPage
+        int perPage,
+        ArtifactKeeperApiProfile apiProfile
 ) {
+    public ArtifactKeeperConfig(URI url, String token, int perPage) {
+        this(url, token, perPage, ArtifactKeeperApiProfile.LEGACY);
+    }
+
     public static ArtifactKeeperConfig from(
             Map<String, String> config)
     {
@@ -24,7 +29,8 @@ public record ArtifactKeeperConfig(
         return new ArtifactKeeperConfig(
                 url,
                 token,
-                perPage
+                perPage,
+                ArtifactKeeperApiProfile.from(config.getOrDefault("api-profile", "legacy"))
         );
     }
 

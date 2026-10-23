@@ -36,7 +36,7 @@ PACT's current backend modules do not yet follow one uniform internal layout:
 | --- | --- | --- |
 | Ranger | `compile`, `sync`, `api`, `client`, config and backend | By default reconciles every policy in the configured service; `managed-only` opts into limiting writes/deletes to policies labeled `managed`. Ensures missing policy users, creating them with random passwords that are not retained. |
 | PostgreSQL | `compile`, `model`, `sync`, `api`, `client`, config and backend | Snapshots PACT-granted ACLs; reconciles identities separately; grant rollback does not reverse password changes. |
-| Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend owns most orchestration and mutable working state; uses default `prepare` compensation. Missing `svc-` usernames trigger service-account creation. |
+| Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend owns most orchestration and mutable working state; uses default `prepare` compensation. Missing `svc-` usernames trigger service-account creation. Account metadata determines logical principal types; `legacy`/`current` API profiles translate service-account permission writes. |
 | Elasticsearch | README and Maven scaffold | Not implemented yet; use the recommendations in this guide rather than copying a partial implementation. |
 
 Artifact Keeper's current implementation already reflects the authoritative

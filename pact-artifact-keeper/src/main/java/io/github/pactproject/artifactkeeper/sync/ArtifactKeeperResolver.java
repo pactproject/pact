@@ -39,12 +39,17 @@ public final class ArtifactKeeperResolver {
         }
 
         var user = state.userById(permission.principalId());
+        if ("service_account".equals(permission.principalType()) && !user.serviceAccount()) {
+            throw new IllegalArgumentException(
+                    "Artifact Keeper service_account permission names a human user: " + user.id()
+            );
+        }
         var repository = state.repositoryById(permission.targetId());
 
         return new ActualArtifactKeeperPermission(
                 permission.id(),
                 repository.name(),
-                permission.principalType(),
+                user.principalType(),
                 user.username(),
                 permission.actions()
         );

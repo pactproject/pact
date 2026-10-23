@@ -158,7 +158,7 @@ class ArtifactKeeperDiffTest {
     }
 
     @Test
-    void replacesLegacyServiceAccountPermissionWithUserType()
+    void preservesNormalizedServiceAccountPermission()
     {
         ActualArtifactKeeperPermission legacy = new ActualArtifactKeeperPermission(
                 "permission-1",
@@ -169,7 +169,7 @@ class ArtifactKeeperDiffTest {
         );
         ArtifactKeeperPermission desired = new ArtifactKeeperPermission(
                 "repository-a",
-                "user",
+                "service_account",
                 "svc-build",
                 Set.of("read")
         );
@@ -178,8 +178,8 @@ class ArtifactKeeperDiffTest {
                 List.of(legacy),
                 List.of(desired)
         );
-        assertEquals(List.of(desired), diff.create());
-        assertEquals(List.of(legacy), diff.delete());
+        assertEquals(List.of(), diff.create());
+        assertEquals(List.of(), diff.delete());
     }
 
     private static ArtifactKeeperPermission permission(

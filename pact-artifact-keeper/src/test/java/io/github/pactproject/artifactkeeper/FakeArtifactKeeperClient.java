@@ -24,6 +24,7 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
     private String failOnCreatePermission;
     private String failOnDeletePermission;
     private String failOnCreateServiceAccount;
+    private boolean failNextCreatePermission;
 
     FakeArtifactKeeperClient(
             List<ArtifactKeeperApiUser> users,
@@ -59,6 +60,11 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
             Set<String> actions
     ) throws ArtifactKeeperClientException {
         createPermissionCalls++;
+
+        if (failNextCreatePermission) {
+            failNextCreatePermission = false;
+            throw new ArtifactKeeperClientException("Simulated one-time permission creation failure");
+        }
 
         if (failOnCreatePermission != null) {
             throw new ArtifactKeeperClientException(
@@ -115,7 +121,8 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
         ArtifactKeeperApiUser user =
                 new ArtifactKeeperApiUser(
                         UUID.randomUUID().toString(),
-                        "svc-" + name
+                        "svc-" + name,
+                        true
                 );
 
         users.add(user);
@@ -137,6 +144,10 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
 
     void failOnCreatePermission() {
         failOnCreatePermission = "createPermission";
+    }
+
+    void failNextCreatePermission() {
+        failNextCreatePermission = true;
     }
 
     void failOnDeletePermission(String id) {

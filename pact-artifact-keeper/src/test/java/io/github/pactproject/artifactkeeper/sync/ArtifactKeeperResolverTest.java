@@ -46,9 +46,9 @@ class ArtifactKeeperResolverTest {
     }
 
     @Test
-    void resolvesLegacyServiceAccountTypeForCleanup() {
+    void resolvesServiceAccountType() {
         var state = new ArtifactKeeperState(
-                List.of(new ArtifactKeeperApiUser("user-1", "svc-build")),
+                List.of(new ArtifactKeeperApiUser("user-1", "svc-build", true)),
                 List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),
                 List.of(new ArtifactKeeperApiPermission(
                         "permission-1",
@@ -70,6 +70,32 @@ class ArtifactKeeperResolverTest {
                 )),
                 ArtifactKeeperResolver.resolve(state)
         );
+    }
+
+    @Test
+    void normalizesLegacyUserGrantUsingAccountMetadata() {
+        var state = new ArtifactKeeperState(
+                List.of(new ArtifactKeeperApiUser("sa-1", "svc-build", true)),
+                List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),
+                List.of(new ArtifactKeeperApiPermission(
+                        "legacy-grant", "user", "sa-1", "repository", "repo-1", Set.of("read")
+                ))
+        );
+        var permission = ArtifactKeeperResolver.resolve(state).getFirst();
+        assertEquals("service_account", permission.principalType());
+        assertEquals("legacy-grant", permission.id());
+    }
+
+    @Test
+    void rejectsServiceAccountGrantNamingAHumanUser() {
+        var state = new ArtifactKeeperState(
+                List.of(new ArtifactKeeperApiUser("user-1", "svc-human", false)),
+                List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),
+                List.of(new ArtifactKeeperApiPermission(
+                        "grant", "service_account", "user-1", "repository", "repo-1", Set.of("read")
+                ))
+        );
+        assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperResolver.resolve(state));
     }
 
     @Test

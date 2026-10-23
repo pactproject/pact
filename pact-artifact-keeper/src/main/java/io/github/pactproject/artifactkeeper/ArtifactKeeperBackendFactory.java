@@ -31,7 +31,8 @@ public final class ArtifactKeeperBackendFactory
 
         return new ArtifactKeeperBackend(
                 id,
-                client
+                client,
+                artifactKeeperConfig.apiProfile()
         );
     }
 }

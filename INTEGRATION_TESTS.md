@@ -20,7 +20,8 @@ resources:
   pre-created test user and at least two repositories. Artifact Keeper
   reconciliation lists and synchronizes permissions for the whole instance.
   The service-account test leaves its uniquely named service account in place;
-  the test removes only the permission it created.
+  the test removes its permission, revokes its test token, and deletes the
+  uniquely named private repository it creates to verify effective access.
 - A disposable PostgreSQL cluster and a login with `CREATEDB` and `CREATEROLE`
   authority. The PostgreSQL live test creates a uniquely named temporary
   database and role, applies grants to those objects, and drops both afterward.
@@ -63,6 +64,7 @@ Set these variables in the test process:
 | `PACT_IT_ARTIFACT_KEEPER_TOKEN` | Yes | Artifact Keeper test token. |
 | `PACT_IT_ARTIFACT_KEEPER_USER` | Yes | Existing user in the test instance. |
 | `PACT_IT_ARTIFACT_KEEPER_REPOSITORY` | Yes | Existing repository in the test instance. |
+| `PACT_IT_ARTIFACT_KEEPER_API_PROFILE` | No | `legacy` (default) for 1.5.1; `current` for 1.11.1. |
 | `PACT_IT_POSTGRESQL_JDBC_URL` | Yes | JDBC URL to an administrative database on a disposable PostgreSQL cluster. |
 | `PACT_IT_POSTGRESQL_USERNAME` | Yes | PostgreSQL account with `CREATEDB` and `CREATEROLE`. |
 | `PACT_IT_POSTGRESQL_PASSWORD` | Yes | PostgreSQL test account password. |
@@ -133,7 +135,22 @@ Artifact Keeper, and PostgreSQL tests. Its test user name and index pattern
 are generated uniquely for each run; the test cleans up only that user's
 owned PACT role and then the user itself.
 
-For Artifact Keeper 1.5.1, Compose sets the server's `ADMIN_PASSWORD` setting.
+Artifact Keeper compatibility CI runs the exact pairs `1.5.1` / `legacy` and
+`1.11.1` / `current`. Each job uses its own disposable database and tests
+service-account creation, private repository access, idempotency, and revocation.
+To choose the newer pair locally, set these values in `integration/.env` before
+starting a fresh Compose project:
+
+```dotenv
+ARTIFACT_KEEPER_VERSION=1.11.1
+PACT_IT_ARTIFACT_KEEPER_API_PROFILE=current
+```
+
+Use separate Compose project names (`-p`) for different server versions so their
+databases and storage volumes are isolated. Do not downgrade an upgraded database.
+The profile is passed to the Maven runner and both E2E apply/cleanup configurations.
+
+Compose sets the server's `ADMIN_PASSWORD` setting.
 The bootstrap job reads the one-time admin password from the storage volume
 when upgrading an existing test volume, then changes it to the configured
 test admin password before creating fixtures.

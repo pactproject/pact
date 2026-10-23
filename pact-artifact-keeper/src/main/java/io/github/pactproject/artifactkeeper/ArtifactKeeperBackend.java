@@ -19,7 +19,9 @@ import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 public final class ArtifactKeeperBackend
         implements Backend
@@ -29,6 +31,7 @@ public final class ArtifactKeeperBackend
 
     private final String id;
     private final ArtifactKeeperClient client;
+    private final ArtifactKeeperApiProfile apiProfile;
 
     private ArtifactKeeperState state;
 
@@ -36,8 +39,17 @@ public final class ArtifactKeeperBackend
             String id,
             ArtifactKeeperClient client)
     {
+        this(id, client, ArtifactKeeperApiProfile.LEGACY);
+    }
+
+    public ArtifactKeeperBackend(
+            String id,
+            ArtifactKeeperClient client,
+            ArtifactKeeperApiProfile apiProfile)
+    {
         this.id = id;
         this.client = client;
+        this.apiProfile = Objects.requireNonNull(apiProfile);
     }
 
     @Override
@@ -54,6 +66,7 @@ public final class ArtifactKeeperBackend
                 compileDesiredState(pactState);
 
         state = loadState();
+        desired = resolveDesiredState(desired);
 
         List<ActualArtifactKeeperPermission> actual =
                 resolveActualState();
@@ -114,6 +127,31 @@ public final class ArtifactKeeperBackend
                     e
             );
         }
+    }
+
+    private List<ArtifactKeeperPermission> resolveDesiredState(
+            List<ArtifactKeeperPermission> desired) throws ValidationException
+    {
+        var resolved = new ArrayList<ArtifactKeeperPermission>();
+        for (ArtifactKeeperPermission permission : desired) {
+            repositoryByName(permission.repository());
+            String principalType;
+            try {
+                principalType = state.userByUsername(permission.username()).principalType();
+            }
+            catch (IllegalArgumentException e) {
+                if (!permission.username().startsWith("svc-")) {
+                    throw new ValidationException(
+                            "Artifact Keeper user not found: " + permission.username(), e
+                    );
+                }
+                principalType = "service_account";
+            }
+            resolved.add(new ArtifactKeeperPermission(
+                    permission.repository(), principalType, permission.username(), permission.actions()
+            ));
+        }
+        return List.copyOf(resolved);
     }
 
     private List<ActualArtifactKeeperPermission> resolveActualState()
@@ -195,7 +233,7 @@ public final class ArtifactKeeperBackend
         try {
             ArtifactKeeperApiPermission created =
                     client.createPermission(
-                            "user",
+                            apiProfile.permissionPrincipalType(user.principalType()),
                             user.id(),
                             "repository",
                             repository.id(),
@@ -210,7 +248,8 @@ public final class ArtifactKeeperBackend
                             + "permission for "
                             + permission.username()
                             + " on "
-                            + permission.repository(),
+                            + permission.repository()
+                            + " (api-profile=" + apiProfile.name().toLowerCase(java.util.Locale.ROOT) + ")",
                     e
             );
         }

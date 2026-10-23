@@ -16,6 +16,7 @@ backends:
     config:
       url: ${PACT_IT_ARTIFACT_KEEPER_URL}
       token: ${PACT_IT_ARTIFACT_KEEPER_TOKEN}
+      api-profile: ${PACT_IT_ARTIFACT_KEEPER_API_PROFILE}
   - id: pact-it-postgres
     type: postgresql
     config:

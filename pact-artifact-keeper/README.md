@@ -12,22 +12,85 @@ Scope the configured Artifact Keeper instance accordingly.
 The Kubernetes `registry` resource maps to an Artifact Keeper repository. An
 access lists principals and the `read`, `write`, `delete`, and `admin` actions.
 PACT resolves usernames and repository names to Artifact Keeper IDs before
-creating permissions. Principals beginning with `svc-` are treated as service
-accounts; other principals are treated as users.
+creating permissions. Existing principals are classified using server account
+metadata, even when their username starts with `svc-`. The `current` profile
+reads `is_service_account` from `/users`; `legacy` obtains service-account IDs
+from `/service-accounts` because 1.5.1 omits that flag from `/users`.
+An absent principal beginning with `svc-` is created through the service-account
+API; an absent principal with any other name is rejected. The backend does not
+manage identity passwords or API tokens, and retains created service accounts
+when their permissions are removed.
 
-PACT creates a missing `svc-` service account through the service-account API,
-but its permission request uses `principal_type: user`, matching the working
-TypeScript backend. The Java resolver accepts legacy `service_account`
-permission entries only so reconciliation can replace them with the
-`user`-typed desired permission. Other principal types and target types fail
-actual-state resolution before the permission diff. The backend does not
-manage identity passwords.
+Within PACT, service-account grants always have the logical type
+`service_account`. The API profile translates that type for permission writes.
+Legacy `user`-typed grants naming a service account are normalized on read and
+preserved when their actions already match. Changing profiles does not force a
+rewrite of those grants. If both wire types exist, revocation deletes every
+matching permission ID. Other principal types and target types fail actual-state
+resolution before the permission diff. Missing or invalid account metadata
+(the flag in `current`, or the separate list in `legacy`) fails state loading
+instead of guessing an existing account's type.
 
 The HTTP permission API is more generic than the current PACT model: permission
 requests contain `principal_type`, `principal_id`, `target_type`, `target_id`,
 and `actions`, all represented by generic strings/IDs in the API.
 
-## Artifact Keeper 1.5.1 compatibility
+## API compatibility and configuration
+
+PACT supports explicit API profiles, independently of its own plugin version:
+
+| Server release used for compatibility tests | `api-profile` | Permission write type for service accounts |
+| --- | --- | --- |
+| 1.5.1 | `legacy` (default) | `user` |
+| 1.11.1 | `current` | `service_account` |
+
+The default preserves existing 1.5.1 configurations. For 1.11.1 configure:
+
+```yaml
+backends:
+  - id: registry
+    type: artifact-keeper
+    config:
+      url: ${ARTIFACT_KEEPER_URL}
+      token: ${ARTIFACT_KEEPER_TOKEN}
+      api-profile: current
+```
+
+`per-page` remains optional and defaults to `100`. Unknown profile names are
+rejected during backend construction. Profiles are selected by the operator;
+PACT does not guess API behavior by retrying writes after `400`/`403` responses.
+The supported matrix covers the exact releases above, not every intermediate
+or future release. Add releases to the CI matrix after checking their contract
+and authorization behavior; add another profile only when a real incompatibility
+requires it. Deprecate old profiles explicitly in release notes before removal.
+
+In both checked releases, service-account creation uses
+`POST /api/v1/service-accounts` with `{"name":"build"}` and returns the account's
+`id` and `username` (`svc-build`). The create response does not need an
+`is_service_account` field because the endpoint establishes its type.
+
+Artifact Keeper 1.11.1 validates the principal type against account metadata on
+permission writes: `user` cannot name a service account. Previously stored
+`user` grants for service accounts still work, so PACT preserves them on read.
+This distinction is implemented in the tagged
+[1.11.1 permission service](https://github.com/artifact-keeper/artifact-keeper/blob/v1.11.1/backend/src/services/permission_service.rs).
+
+The backend credential needs administrator authorization and the scopes required
+to list users/repositories/permissions and create/delete permissions and service
+accounts. In 1.11.1, an admin-owned API token must also carry `admin` (or `*`) to
+retain administrator authority; narrow artifact scopes alone do not suffice.
+See the tagged [authentication middleware](https://github.com/artifact-keeper/artifact-keeper/blob/v1.11.1/backend/src/api/middleware/auth.rs).
+A `403` indicates an authorization problem, not a reason to switch API profiles.
+A service account can be created successfully before its permission request
+fails, so inspect the failed endpoint and the nested HTTP error.
+
+Desired user/repository references are validated before permission writes.
+Reconciliation retains the normal PACT transaction model: `pact-core` invokes
+compensation after a failure, and this backend restores the previous desired
+grants through the same profile. Compensation does not delete created accounts
+and can itself fail if the external API remains unavailable or denies writes.
+
+### Permission JSON contract
 
 The permission create/list JSON contract in PACT matches the tagged Artifact
 Keeper 1.5.1 server API: create uses `principal_type`, `principal_id`,
@@ -36,10 +99,15 @@ Keeper 1.5.1 server API: create uses `principal_type`, `principal_id`,
 and target IDs to be UUIDs. PACT resolves names to IDs before creating
 permissions. A local HTTP contract test protects these field names and shapes.
 
-This confirms schema compatibility, not live behavior of every deployment.
-The opt-in integration test should be run against the actual deployed server
-version and with a token that has permission-write scope and administrator
-authorization. The checked server implementation is pinned at
+The CI compatibility matrix and opt-in live tests cover both releases above,
+including service-account creation, repeated reconciliation, grant revocation,
+and actual access to a private repository with a service-account token. Unit
+tests also cover legacy grant normalization and compensation after a partially
+applied change. The live test deletes its private repository and revokes its
+test token, retaining only the uniquely named service account. See
+[integration instructions](../INTEGRATION_TESTS.md). Run the tests against the
+actual deployed release before extending the supported matrix.
+The original checked server implementation is pinned at
 [Artifact Keeper 1.5.1 permissions handler](https://github.com/artifact-keeper/artifact-keeper/blob/25d498934aca6887cf27726bfa3e2c748dbdeb8e/backend/src/api/handlers/permissions.rs).
 
 ## Upstream capabilities and model roadmap

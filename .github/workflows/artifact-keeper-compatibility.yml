@@ -1,0 +1,74 @@
+name: Artifact Keeper compatibility
+
+on:
+  pull_request:
+    paths:
+      - "pact-api/**"
+      - "pact-artifact-keeper/**"
+      - "integration/**"
+      - "pom.xml"
+      - ".github/workflows/artifact-keeper-compatibility.yml"
+  push:
+    branches: [master]
+    paths:
+      - "pact-api/**"
+      - "pact-artifact-keeper/**"
+      - "integration/**"
+      - "pom.xml"
+      - ".github/workflows/artifact-keeper-compatibility.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "1.5.1"
+            api_profile: legacy
+          - version: "1.11.1"
+            api_profile: current
+    env:
+      ARTIFACT_KEEPER_VERSION: ${{ matrix.version }}
+      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${{ matrix.api_profile }}
+      ARTIFACT_KEEPER_URL: http://localhost:8080
+      ARTIFACT_KEEPER_INITIAL_PASSWORD: PactLocalInitial1!
+      ARTIFACT_KEEPER_ADMIN_PASSWORD: PactLocalAdmin2!
+      ARTIFACT_KEEPER_TEST_USER: pact-it-user
+      ARTIFACT_KEEPER_TEST_USER_PASSWORD: PactLocalUser3!
+      ARTIFACT_KEEPER_TEST_REPOSITORY: pact-it-repo-a
+      PACT_IT_ARTIFACT_KEEPER_URL: http://localhost:8080
+      PACT_IT_ARTIFACT_KEEPER_ADMIN_PASSWORD: PactLocalAdmin2!
+      PACT_IT_ARTIFACT_KEEPER_USER: pact-it-user
+      PACT_IT_ARTIFACT_KEEPER_REPOSITORY: pact-it-repo-a
+      PACT_IT_BACKEND_MODULES: pact-artifact-keeper
+      PACT_IT_BACKEND_TESTS: ArtifactKeeperLiveIntegrationTest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Unit and HTTP contract tests
+        run: mvn -B -pl pact-artifact-keeper -am test
+      - name: Start isolated Artifact Keeper
+        run: docker compose -p pact-ak-compat -f integration/compose.yaml up -d --wait --wait-timeout 300 artifact-keeper
+      - name: Bootstrap fixtures
+        run: bash integration/scripts/bootstrap-artifact-keeper.sh
+      - name: Live reconciliation and service-account access
+        run: bash integration/scripts/run-backend-live-tests.sh
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-keeper-${{ matrix.version }}-reports
+          path: pact-artifact-keeper/target/surefire-reports/
+      - name: Remove disposable stack
+        if: always()
+        run: docker compose -p pact-ak-compat -f integration/compose.yaml down -v

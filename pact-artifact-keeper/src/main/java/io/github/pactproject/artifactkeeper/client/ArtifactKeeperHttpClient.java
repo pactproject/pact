@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.pactproject.artifactkeeper.ArtifactKeeperApiProfile;
 import io.github.pactproject.artifactkeeper.ArtifactKeeperConfig;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
@@ -20,7 +21,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 public final class ArtifactKeeperHttpClient
@@ -35,6 +38,7 @@ public final class ArtifactKeeperHttpClient
     private final URI baseUri;
     private final String token;
     private final int perPage;
+    private final ArtifactKeeperApiProfile apiProfile;
 
     public ArtifactKeeperHttpClient(
             String baseUrl,
@@ -56,6 +60,17 @@ public final class ArtifactKeeperHttpClient
             String token,
             int perPage
     ) {
+        this(httpClient, objectMapper, baseUrl, token, perPage, ArtifactKeeperApiProfile.LEGACY);
+    }
+
+    public ArtifactKeeperHttpClient(
+            HttpClient httpClient,
+            ObjectMapper objectMapper,
+            String baseUrl,
+            String token,
+            int perPage,
+            ArtifactKeeperApiProfile apiProfile
+    ) {
         if (perPage <= 0) {
             throw new IllegalArgumentException(
                     "perPage must be greater than zero"
@@ -71,6 +86,7 @@ public final class ArtifactKeeperHttpClient
         );
         this.token = token;
         this.perPage = perPage;
+        this.apiProfile = Objects.requireNonNull(apiProfile);
     }
 
     public ArtifactKeeperHttpClient(ArtifactKeeperConfig artifactKeeperConfig) {
@@ -81,19 +97,41 @@ public final class ArtifactKeeperHttpClient
                 artifactKeeperConfig.token(),
                 artifactKeeperConfig.perPage() > 0
                         ? artifactKeeperConfig.perPage()
-                        : DEFAULT_PER_PAGE
+                        : DEFAULT_PER_PAGE,
+                artifactKeeperConfig.apiProfile()
         );
     }
 
     @Override
     public List<ArtifactKeeperApiUser> getUsers() throws ArtifactKeeperClientException {
+        // 1.5.1 omits is_service_account from /users. Its separate account list
+        // has no pagination envelope; do not pass it through getAllPages.
+        Set<String> serviceAccountIds = apiProfile == ArtifactKeeperApiProfile.LEGACY
+                ? getServiceAccountIds() : Set.of();
         return getAllPages(
                 "/api/v1/users",
                 node -> new ArtifactKeeperApiUser(
                         text(node, "id"),
-                        text(node, "username")
+                        text(node, "username"),
+                        apiProfile == ArtifactKeeperApiProfile.LEGACY
+                                ? serviceAccountIds.contains(text(node, "id"))
+                                : serviceAccountFlag(node)
                 )
         );
+    }
+
+    private Set<String> getServiceAccountIds() throws ArtifactKeeperClientException {
+        JsonNode response = request("GET", "/api/v1/service-accounts", null, null);
+        if (response == null || !response.path("items").isArray()) {
+            throw new ArtifactKeeperClientException(
+                    "Artifact Keeper service-account list is missing an 'items' array"
+            );
+        }
+        Set<String> ids = new HashSet<>();
+        for (JsonNode account : response.path("items")) {
+            ids.add(text(account, "id"));
+        }
+        return Set.copyOf(ids);
     }
 
     @Override
@@ -183,8 +221,20 @@ public final class ArtifactKeeperHttpClient
 
         return new ArtifactKeeperApiUser(
                 text(response, "id"),
-                text(response, "username")
+                text(response, "username"),
+                true
         );
+    }
+
+    private static boolean serviceAccountFlag(JsonNode node)
+            throws ArtifactKeeperClientException {
+        JsonNode flag = node.path("is_service_account");
+        if (!flag.isBoolean()) {
+            throw new ArtifactKeeperClientException(
+                    "Artifact Keeper user response is missing boolean 'is_service_account'"
+            );
+        }
+        return flag.booleanValue();
     }
 
     private <T> List<T> getAllPages(

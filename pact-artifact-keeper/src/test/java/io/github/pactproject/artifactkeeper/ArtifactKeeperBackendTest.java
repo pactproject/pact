@@ -9,6 +9,8 @@ import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.List;
 import java.util.Map;
@@ -422,6 +424,111 @@ class ArtifactKeeperBackendTest {
 
         assertEquals(1, client.createServiceAccountCalls());
         assertEquals(0, client.createPermissionCalls());
+    }
+
+    @ParameterizedTest
+    @EnumSource(ArtifactKeeperApiProfile.class)
+    void createsServiceAccountsIdempotentlyWithProfileSpecificWireType(ArtifactKeeperApiProfile profile)
+            throws Exception {
+        var client = client(List.of(), List.of(REPOSITORY), List.of());
+        var backend = new ArtifactKeeperBackend("ak", client, profile);
+        var desired = state(access("svc-build", "repository-a", Set.of("read")));
+
+        backend.apply(desired);
+        var created = client.getPermissions().getFirst();
+        assertEquals(profile == ArtifactKeeperApiProfile.LEGACY ? "user" : "service_account",
+                created.principalType());
+        assertTrue(client.getUsers().getFirst().serviceAccount());
+
+        backend.apply(desired);
+        assertEquals(List.of(created), client.getPermissions());
+        assertEquals(1, client.createServiceAccountCalls());
+        assertEquals(1, client.createPermissionCalls());
+        assertEquals(0, client.deletePermissionCalls());
+
+        backend.apply(PactState.empty());
+        assertTrue(client.getPermissions().isEmpty());
+        assertEquals(1, client.getUsers().size());
+    }
+
+    @Test
+    void currentProfilePreservesLegacyGrantsAndRevokesEveryPhysicalRow() throws Exception {
+        var account = new ArtifactKeeperApiUser("sa-1", "svc-build", true);
+        var legacy = permission("legacy", account.id(), REPOSITORY.id(), Set.of("read"));
+        var current = new ArtifactKeeperApiPermission(
+                "current", "service_account", account.id(), "repository", REPOSITORY.id(), Set.of("read"));
+        var client = client(List.of(account), List.of(REPOSITORY), List.of(legacy, current));
+        var backend = new ArtifactKeeperBackend("ak", client, ArtifactKeeperApiProfile.CURRENT);
+
+        backend.apply(state(access(account.username(), REPOSITORY.name(), Set.of("read"))));
+        assertEquals(List.of(legacy, current), client.getPermissions());
+        assertEquals(0, client.createPermissionCalls());
+        assertEquals(0, client.deletePermissionCalls());
+
+        backend.apply(PactState.empty());
+        assertTrue(client.getPermissions().isEmpty());
+        assertEquals(2, client.deletePermissionCalls());
+    }
+
+    @Test
+    void resolvesExistingPrincipalTypesFromMetadataInsteadOfName() throws Exception {
+        var human = new ArtifactKeeperApiUser("human", "svc-human", false);
+        var account = new ArtifactKeeperApiUser("machine", "imported-bot", true);
+        var client = client(List.of(human, account), List.of(REPOSITORY), List.of());
+        var backend = new ArtifactKeeperBackend("ak", client, ArtifactKeeperApiProfile.CURRENT);
+
+        backend.apply(state(
+                access(human.username(), REPOSITORY.name(), Set.of("read")),
+                access(account.username(), REPOSITORY.name(), Set.of("read"))
+        ));
+        assertTrue(client.getPermissions().stream().anyMatch(p ->
+                p.principalId().equals(human.id()) && p.principalType().equals("user")));
+        assertTrue(client.getPermissions().stream().anyMatch(p ->
+                p.principalId().equals(account.id()) && p.principalType().equals("service_account")));
+        assertEquals(0, client.createServiceAccountCalls());
+    }
+
+    @ParameterizedTest
+    @EnumSource(ArtifactKeeperApiProfile.class)
+    void compensationRestoresServiceAccountGrantAfterPartialFailure(ArtifactKeeperApiProfile profile)
+            throws Exception {
+        var client = client(List.of(), List.of(REPOSITORY), List.of());
+        var backend = new ArtifactKeeperBackend("ak", client, profile);
+        var previous = state(access("svc-build", REPOSITORY.name(), Set.of("read")));
+        backend.apply(previous);
+        var accountId = client.getUsers().getFirst().id();
+        var transaction = backend.prepare(previous,
+                state(access("svc-build", REPOSITORY.name(), Set.of("write"))));
+        assertEquals(1, client.createPermissionCalls(), "prepare must not write");
+
+        client.failNextCreatePermission();
+        assertThrows(BackendOperationException.class, transaction::apply);
+        assertTrue(client.getPermissions().isEmpty(), "old grant was deleted before create failed");
+        transaction.rollback();
+
+        var restored = client.getPermissions().getFirst();
+        assertEquals(accountId, restored.principalId());
+        assertEquals(profile == ArtifactKeeperApiProfile.LEGACY ? "user" : "service_account",
+                restored.principalType());
+        assertEquals(Set.of("read"), restored.actions());
+        assertEquals(1, client.createServiceAccountCalls());
+        backend.apply(previous);
+        assertEquals(List.of(restored), client.getPermissions());
+    }
+
+    @Test
+    void validatesAllDesiredReferencesBeforeDeletingGrants() {
+        var existing = permission("keep", ALICE.id(), REPOSITORY.id(), Set.of("read"));
+        var client = client(List.of(ALICE), List.of(REPOSITORY), List.of(existing));
+        var backend = new ArtifactKeeperBackend("ak", client, ArtifactKeeperApiProfile.CURRENT);
+
+        assertThrows(ValidationException.class, () -> backend.apply(
+                state(access("missing-human", REPOSITORY.name(), Set.of("read")))));
+        assertThrows(ValidationException.class, () -> backend.apply(
+                state(access("svc-build", "missing-repo", Set.of("read")))));
+        assertEquals(List.of(existing), client.getPermissions());
+        assertEquals(0, client.deletePermissionCalls());
+        assertEquals(0, client.createServiceAccountCalls());
     }
 
     private static FakeArtifactKeeperClient client(

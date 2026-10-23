@@ -4,18 +4,109 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
+import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
+import io.github.pactproject.artifactkeeper.ArtifactKeeperApiProfile;
+import io.github.pactproject.artifactkeeper.ArtifactKeeperConfig;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ArtifactKeeperHttpClientTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @ParameterizedTest
+    @EnumSource(ArtifactKeeperApiProfile.class)
+    void readsAccountTypesAndCreatesAccountWithUnchangedJsonContract(ArtifactKeeperApiProfile profile)
+            throws Exception, ArtifactKeeperClientException {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<JsonNode> requestBody = new AtomicReference<>();
+        server.createContext("/api/v1/users", exchange -> {
+            String users = """
+                    {"items": [
+                      {"id":"human","username":"svc-human","is_service_account":false},
+                      {"id":"machine","username":"imported-bot","is_service_account":true}
+                    ], "pagination":{"total_pages":1}}
+                    """;
+            if (profile == ArtifactKeeperApiProfile.LEGACY) {
+                users = users.replace(",\"is_service_account\":false", "")
+                        .replace(",\"is_service_account\":true", "");
+            }
+            byte[] body = users.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.createContext("/api/v1/service-accounts", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                byte[] body = """
+                        {"items":[{"id":"machine","username":"imported-bot"}]}
+                        """.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+                return;
+            }
+            requestBody.set(MAPPER.readTree(exchange.getRequestBody().readAllBytes()));
+            byte[] body = """
+                    {"id":"created","username":"svc-build","display_name":null,"is_active":true}
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new ArtifactKeeperHttpClient(new ArtifactKeeperConfig(
+                    java.net.URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "test-token", 100, profile));
+            assertEquals(List.of(
+                    new ArtifactKeeperApiUser("human", "svc-human", false),
+                    new ArtifactKeeperApiUser("machine", "imported-bot", true)), client.getUsers());
+            var created = client.createServiceAccount("build");
+            assertEquals("svc-build", created.username());
+            assertTrue(created.serviceAccount(), "create response has no is_service_account field");
+            assertEquals(MAPPER.readTree("{\"name\":\"build\"}"), requestBody.get());
+        }
+        finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void rejectsMissingAccountMetadataBeforeReconciliation()
+            throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/v1/users", exchange -> {
+            byte[] body = """
+                    {"items":[{"id":"machine","username":"svc-build"}],"pagination":{"total_pages":1}}
+                    """.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new ArtifactKeeperHttpClient(new ArtifactKeeperConfig(
+                    java.net.URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "test-token", 100, ArtifactKeeperApiProfile.CURRENT));
+            var error = assertThrows(ArtifactKeeperClientException.class, client::getUsers);
+            assertTrue(error.getMessage().contains("is_service_account"));
+        }
+        finally {
+            server.stop(0);
+        }
+    }
 
     @Test
     void readsAndCreatesV151PermissionSchema()

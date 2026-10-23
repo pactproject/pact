@@ -56,7 +56,7 @@ class ArtifactKeeperCompilerTest {
         assertEquals(
                 List.of(new ArtifactKeeperPermission(
                         "repository-a",
-                        "user",
+                        "service_account",
                         "svc-build",
                         Set.of("read")
                 )),

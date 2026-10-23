@@ -1,5 +1,7 @@
 package io.github.pactproject.artifactkeeper;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.pactproject.api.Access;
 import io.github.pactproject.api.BackendTransaction;
 import io.github.pactproject.api.PactState;
@@ -16,19 +18,23 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @EnabledIfSystemProperty(named = "pact.integration", matches = "true")
 class ArtifactKeeperLiveIntegrationTest {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     @Test
     void reconcilesRepositoryPermissionsAgainstLiveApi()
             throws Exception, ArtifactKeeperClientException {
-        ArtifactKeeperConfig config = ArtifactKeeperConfig.from(Map.of(
-                "url", required("PACT_IT_ARTIFACT_KEEPER_URL"),
-                "token", required("PACT_IT_ARTIFACT_KEEPER_TOKEN")
-        ));
+        ArtifactKeeperConfig config = config(100);
         ArtifactKeeperHttpClient client = new ArtifactKeeperHttpClient(config);
         String username = required("PACT_IT_ARTIFACT_KEEPER_USER");
         String repositoryName = required("PACT_IT_ARTIFACT_KEEPER_REPOSITORY");
@@ -52,7 +58,7 @@ class ArtifactKeeperLiveIntegrationTest {
                         "Configured integration-test repository must already exist"
                 ));
 
-        ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client);
+        ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
         PactState initial = state(username, repositoryName, Set.of("read"));
         PactState updated = state(username, repositoryName, Set.of("read", "write"));
         BackendTransaction create = backend.prepare(PactState.empty(), initial);
@@ -106,12 +112,9 @@ class ArtifactKeeperLiveIntegrationTest {
     @Test
     void createsServiceAccountWhenEnsuringPermission()
             throws Exception, ArtifactKeeperClientException {
-        ArtifactKeeperConfig config = ArtifactKeeperConfig.from(Map.of(
-                "url", required("PACT_IT_ARTIFACT_KEEPER_URL"),
-                "token", required("PACT_IT_ARTIFACT_KEEPER_TOKEN")
-        ));
+        ArtifactKeeperConfig config = config(100);
         ArtifactKeeperHttpClient client = new ArtifactKeeperHttpClient(config);
-        String repositoryName = required("PACT_IT_ARTIFACT_KEEPER_REPOSITORY");
+        String repositoryName = "pact-it-private-" + UUID.randomUUID().toString().replace("-", "");
         String username = "svc-pact-it-" + UUID.randomUUID()
                 .toString().replace("-", "");
 
@@ -124,11 +127,15 @@ class ArtifactKeeperLiveIntegrationTest {
                         .noneMatch(user -> user.username().equals(username)),
                 "The generated service account name must be unused"
         );
-        String repositoryId = repositoryId(client, repositoryName);
-        ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client);
+        String repositoryId = apiJson(config, "POST", "/api/v1/repositories", MAPPER.valueToTree(Map.of(
+                "key", repositoryName, "name", repositoryName,
+                "format", "maven", "repo_type", "local", "is_public", false
+        ))).path("id").asText();
+        ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
         PactState desired = state(username, repositoryName, Set.of("read"));
         BackendTransaction transaction =
                 backend.prepare(PactState.empty(), desired);
+        String tokenPath = null;
 
         try {
             transaction.apply();
@@ -143,12 +150,44 @@ class ArtifactKeeperLiveIntegrationTest {
                     client.getPermissions(),
                     userId,
                     repositoryId,
-                    "user",
+                    config.apiProfile().permissionPrincipalType("service_account"),
                     Set.of("read")
             );
+            String permissionId = client.getPermissions().getFirst().id();
+            backend.apply(desired);
+            assertEquals(permissionId, client.getPermissions().getFirst().id(),
+                    "Repeated reconciliation must preserve the permission ID");
+
+            String accountTokensPath = "/api/v1/service-accounts/" + userId + "/tokens";
+            JsonNode token = apiJson(config, "POST", accountTokensPath, MAPPER.valueToTree(Map.of(
+                    "name", "pact-it-read", "scopes", List.of("read:artifacts"), "expires_in_days", 1
+            )));
+            tokenPath = accountTokensPath + "/" + token.path("id").asText();
+            String accountToken = token.path("token").asText();
+            assertEquals(200, apiRequest(config, accountToken, "GET",
+                    "/api/v1/repositories/" + repositoryName, null).statusCode(),
+                    "Service-account grant must allow reading a private repository");
+
+            transaction.rollback();
+            int denied = apiRequest(config, accountToken, "GET",
+                    "/api/v1/repositories/" + repositoryName, null).statusCode();
+            assertTrue(denied == 403 || denied == 404,
+                    "Revoking the grant must deny repository access; got " + denied);
         }
         finally {
-            transaction.rollback();
+            try {
+                transaction.rollback();
+            }
+            finally {
+                try {
+                    if (tokenPath != null) {
+                        apiJson(config, "DELETE", tokenPath, null);
+                    }
+                }
+                finally {
+                    apiJson(config, "DELETE", "/api/v1/repositories/" + repositoryName, null);
+                }
+            }
         }
 
         assertTrue(
@@ -165,11 +204,7 @@ class ArtifactKeeperLiveIntegrationTest {
     @Test
     void loadsAndReconcilesPermissionsAcrossMultiplePages()
             throws Exception, ArtifactKeeperClientException {
-        ArtifactKeeperConfig config = ArtifactKeeperConfig.from(Map.of(
-                "url", required("PACT_IT_ARTIFACT_KEEPER_URL"),
-                "token", required("PACT_IT_ARTIFACT_KEEPER_TOKEN"),
-                "per-page", "1"
-        ));
+        ArtifactKeeperConfig config = config(1);
         ArtifactKeeperHttpClient client = new ArtifactKeeperHttpClient(config);
         String username = required("PACT_IT_ARTIFACT_KEEPER_USER");
         List<String> repositories = client.getRepositories().stream()
@@ -201,7 +236,7 @@ class ArtifactKeeperLiveIntegrationTest {
                         repository -> repository.id()
                 ));
 
-        ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client);
+        ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
         PactState desired = new PactState(repositories.stream()
                 .map(repository -> new Access(
                         username,
@@ -237,6 +272,36 @@ class ArtifactKeeperLiveIntegrationTest {
         finally {
             backend.apply(PactState.empty());
         }
+    }
+
+    private static ArtifactKeeperConfig config(int perPage) {
+        return ArtifactKeeperConfig.from(Map.of(
+                "url", required("PACT_IT_ARTIFACT_KEEPER_URL"),
+                "token", required("PACT_IT_ARTIFACT_KEEPER_TOKEN"),
+                "per-page", Integer.toString(perPage),
+                "api-profile", System.getenv().getOrDefault("PACT_IT_ARTIFACT_KEEPER_API_PROFILE", "legacy")
+        ));
+    }
+
+    private static HttpResponse<String> apiRequest(
+            ArtifactKeeperConfig config, String token, String method, String path, JsonNode body)
+            throws Exception {
+        var request = HttpRequest.newBuilder(URI.create(config.url().toString().replaceAll("/+$", "") + path))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", "Bearer " + token)
+                .header("Content-Type", "application/json")
+                .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
+                .build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static JsonNode apiJson(ArtifactKeeperConfig config, String method, String path, JsonNode body)
+            throws Exception {
+        var response = apiRequest(config, config.token(), method, path, body);
+        assertTrue(response.statusCode() >= 200 && response.statusCode() < 300,
+                method + " " + path + " returned " + response.statusCode());
+        return response.body().isBlank() ? MAPPER.nullNode() : MAPPER.readTree(response.body());
     }
 
     private static PactState state(

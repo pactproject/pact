@@ -45,7 +45,8 @@ public final class ArtifactKeeperCompiler {
         return merged.entrySet().stream()
                 .map(entry -> new ArtifactKeeperPermission(
                         entry.getKey().repository(),
-                        "user",
+                        entry.getKey().username().startsWith("svc-")
+                                ? "service_account" : "user",
                         entry.getKey().username(),
                         entry.getValue()
                 ))
