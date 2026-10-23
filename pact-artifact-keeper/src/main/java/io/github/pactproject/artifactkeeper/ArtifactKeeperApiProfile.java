@@ -20,6 +20,7 @@ public enum ArtifactKeeperApiProfile {
         return switch (logicalType) {
             case "user" -> "user";
             case "service_account" -> this == LEGACY ? "user" : "service_account";
+            case "group", "anonymous" -> logicalType;
             default -> throw new IllegalArgumentException(
                     "Unsupported Artifact Keeper principal type: " + logicalType
             );

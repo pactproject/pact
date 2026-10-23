@@ -12,6 +12,9 @@ import io.github.pactproject.artifactkeeper.client.ArtifactKeeperClientException
 import io.github.pactproject.artifactkeeper.client.ArtifactKeeperHttpClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -30,6 +33,86 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @EnabledIfSystemProperty(named = "pact.integration", matches = "true")
 class ArtifactKeeperLiveIntegrationTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @ParameterizedTest
+    @ValueSource(strings = {"repository", "artifact", "project", "group", "system", "global", "future_scope"})
+    void reconcilesEveryTargetTypeThroughLivePermissionApi(String type)
+            throws Exception, ArtifactKeeperClientException {
+        var config = config(100);
+        var client = new ArtifactKeeperHttpClient(config);
+        assertTrue(client.getPermissions().isEmpty(), "Use a dedicated instance");
+        String targetId = type.equals("repository")
+                ? repositoryId(client, required("PACT_IT_ARTIFACT_KEEPER_REPOSITORY"))
+                : type.equals("system") ? "00000000-0000-0000-0000-000000000000" : UUID.randomUUID().toString();
+        Map<String, Value> conditions = config.apiProfile() == ArtifactKeeperApiProfile.CURRENT
+                ? Map.of("allowed_cidrs", Value.set(Set.of(
+                        Value.string("10.0.0.0/8"), Value.string("2001:db8::/32"))))
+                : Map.of();
+        var backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
+        var desired = typedState(required("PACT_IT_ARTIFACT_KEEPER_USER"), "user", type, targetId,
+                Set.of("read"), conditions);
+        try {
+            backend.apply(desired);
+            var grant = client.getPermissions().getFirst();
+            assertEquals(type, grant.targetType());
+            assertEquals(targetId, grant.targetId());
+            assertEquals(conditions, grant.conditions());
+            backend.apply(desired);
+            assertEquals(List.of(grant), client.getPermissions(), "Identical state must preserve the grant ID");
+            backend.apply(typedState(required("PACT_IT_ARTIFACT_KEEPER_USER"), "user", type, targetId,
+                    Set.of("read", "write"), conditions));
+            var updated = client.getPermissions().getFirst();
+            assertEquals(type, updated.targetType());
+            assertEquals(targetId, updated.targetId());
+            assertEquals(Set.of("read", "write"), updated.actions());
+            assertEquals(conditions, updated.conditions());
+        } finally {
+            backend.apply(PactState.empty());
+        }
+        assertTrue(client.getPermissions().isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"group", "anonymous"})
+    @EnabledIfEnvironmentVariable(named = "PACT_IT_ARTIFACT_KEEPER_API_PROFILE", matches = "current")
+    void reconcilesNonUserPrincipalsThroughLiveApi(String principalType)
+            throws Exception, ArtifactKeeperClientException {
+        var config = config(100);
+        var client = new ArtifactKeeperHttpClient(config);
+        assertTrue(client.getPermissions().isEmpty(), "Use a dedicated instance");
+        String groupId = null;
+        String principal = "anonymous";
+        if (principalType.equals("group")) {
+            groupId = apiJson(config, "POST", "/api/v1/groups", MAPPER.valueToTree(Map.of(
+                    "name", "pact-it-" + UUID.randomUUID(), "description", "PACT permission test"))).path("id").asText();
+            principal = groupId;
+        }
+        var backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
+        var desired = typedState(principal, principalType, "repository",
+                repositoryId(client, required("PACT_IT_ARTIFACT_KEEPER_REPOSITORY")), Set.of("read"), Map.of());
+        try {
+            backend.apply(desired);
+            var grant = client.getPermissions().getFirst();
+            assertEquals(principalType, grant.principalType());
+            assertEquals(groupId == null ? "00000000-0000-0000-0000-000000000000" : groupId, grant.principalId());
+            backend.apply(desired);
+            assertEquals(List.of(grant), client.getPermissions());
+        } finally {
+            try {
+                backend.apply(PactState.empty());
+            } finally {
+                if (groupId != null) apiJson(config, "DELETE", "/api/v1/groups/" + groupId, null);
+            }
+        }
+        assertTrue(client.getPermissions().isEmpty());
+    }
+
+    private static PactState typedState(String principal, String principalType, String type, String id,
+                                         Set<String> actions, Map<String, Value> conditions) {
+        return new PactState(Set.of(new Access(principal, new Resource("registry", Map.of("type", type, "id", id)),
+                Map.of("principal-type", Value.string(principalType), "conditions", Value.object(conditions),
+                        "actions", Value.set(actions.stream().map(Value::string).collect(Collectors.toSet()))))));
+    }
 
     @Test
     void reconcilesRepositoryPermissionsAgainstLiveApi()

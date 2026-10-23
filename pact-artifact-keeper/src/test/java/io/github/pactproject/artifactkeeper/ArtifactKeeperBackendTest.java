@@ -11,6 +11,8 @@ import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import io.github.pactproject.api.value.Value;
 
 import java.util.List;
 import java.util.Map;
@@ -529,6 +531,75 @@ class ArtifactKeeperBackendTest {
         assertEquals(List.of(existing), client.getPermissions());
         assertEquals(0, client.deletePermissionCalls());
         assertEquals(0, client.createServiceAccountCalls());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"repository", "artifact", "project", "group", "system", "global", "future_scope"})
+    void reconcilesEveryTargetTypeWithoutReinterpretingItsId(String targetType) throws Exception {
+        String targetId = "11111111-1111-1111-1111-111111111111";
+        var repository = new ArtifactKeeperApiRepository(targetId, "repository-a");
+        var grant = new ArtifactKeeperApiPermission("existing", "user", ALICE.id(), targetType,
+                targetId, Set.of("read"));
+        var client = client(List.of(ALICE), List.of(repository), List.of(grant));
+        var backend = new ArtifactKeeperBackend("ak", client, ArtifactKeeperApiProfile.CURRENT);
+        var desired = typedState("alice", "user", targetType, targetId, Set.of("read"), Map.of());
+
+        backend.apply(desired);
+        assertEquals(List.of(grant), client.getPermissions());
+        assertEquals(0, client.deletePermissionCalls());
+
+        backend.apply(typedState("alice", "user", targetType, targetId, Set.of("read", "write"), Map.of()));
+        assertEquals(targetType, client.getPermissions().getFirst().targetType());
+        assertEquals(targetId, client.getPermissions().getFirst().targetId());
+        backend.apply(PactState.empty());
+        assertTrue(client.getPermissions().isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"group", "anonymous"})
+    void reconcilesNonUserPrincipals(String type) throws Exception {
+        String id = type.equals("anonymous") ? "00000000-0000-0000-0000-000000000000"
+                : "22222222-2222-2222-2222-222222222222";
+        String targetId = "11111111-1111-1111-1111-111111111111";
+        var client = client(List.of(), List.of(new ArtifactKeeperApiRepository(targetId, "repository-a")), List.of());
+        var backend = new ArtifactKeeperBackend("ak", client, ArtifactKeeperApiProfile.CURRENT);
+        var desired = typedState(id, type, "repository", targetId, Set.of("read"), Map.of());
+        backend.apply(desired);
+        var grant = client.getPermissions().getFirst();
+        assertEquals(type, grant.principalType());
+        assertEquals(id, grant.principalId());
+        backend.apply(desired);
+        assertEquals(List.of(grant), client.getPermissions());
+        backend.apply(PactState.empty());
+        assertTrue(client.getPermissions().isEmpty());
+    }
+
+    @Test
+    void conditionalPermissionIsDistinctFromUnconditionalGrant() throws Exception {
+        String targetId = "11111111-1111-1111-1111-111111111111";
+        var conditions = Map.of("allowed_cidrs", Value.set(Set.of(Value.string("10.0.0.0/8"))));
+        var grant = new ArtifactKeeperApiPermission("old", "user", ALICE.id(), "artifact", targetId,
+                Set.of("read"), Map.copyOf(conditions));
+        var client = client(List.of(ALICE), List.of(), List.of(grant));
+        var backend = new ArtifactKeeperBackend("ak", client, ArtifactKeeperApiProfile.CURRENT);
+        var previous = typedState("alice", "user", "artifact", targetId, Set.of("read"), Map.copyOf(conditions));
+        backend.apply(previous);
+        assertEquals(0, client.deletePermissionCalls());
+        var transaction = backend.prepare(previous,
+                typedState("alice", "user", "artifact", targetId, Set.of("read"), Map.of()));
+        client.failNextCreatePermission();
+        assertThrows(BackendOperationException.class, transaction::apply);
+        transaction.rollback();
+        assertEquals(conditions, client.getPermissions().getFirst().conditions());
+    }
+
+    private static PactState typedState(String principal, String principalType, String type, String id,
+                                        Set<String> actions, Map<String, Value> conditions) {
+        return state(new Access(principal, new Resource("ak", Map.of("type", type, "id", id)), Map.of(
+                "principal-type", Value.string(principalType),
+                "conditions", Value.object(conditions),
+                "actions", Value.set(actions.stream().map(Value::string).collect(java.util.stream.Collectors.toSet()))
+        )));
     }
 
     private static FakeArtifactKeeperClient client(

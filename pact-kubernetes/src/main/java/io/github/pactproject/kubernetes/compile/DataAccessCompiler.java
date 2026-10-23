@@ -184,15 +184,20 @@ public final class DataAccessCompiler
         List<Map<String, String>> targets;
         if (backendId.equals(REGISTRY_SERVICE)) {
             Object targetValue = resource.get(backendId);
-            if (!(targetValue instanceof Map<?, ?> registryTarget)
-                    || !registryTarget.keySet().equals(Set.of("name"))) {
+            if (!(targetValue instanceof Map<?, ?> registryTarget)) {
                 throw invalid(
-                        "Registry service requires only a name field"
+                        "Registry service requires name, or type and id fields"
                 );
             }
-            Map<String, Object> registryFields = new HashMap<>();
-            registryFields.put("repository", registryTarget.get("name"));
-            targets = targetCombinations(registryFields);
+            if (registryTarget.keySet().equals(Set.of("name"))) {
+                Map<String, Object> registryFields = new HashMap<>();
+                registryFields.put("repository", registryTarget.get("name"));
+                targets = targetCombinations(registryFields);
+            } else if (registryTarget.keySet().equals(Set.of("type", "id"))) {
+                targets = parseTarget(registryTarget);
+            } else {
+                throw invalid("Registry service requires only name, or type and id fields");
+            }
         }
         else {
             targets = parseTarget(resource.get(backendId));
@@ -329,7 +334,7 @@ public final class DataAccessCompiler
             }
 
             if (!key.equals(USERS_FIELD)
-                    && !key.equals("permissions")) {
+                    && !Set.of("principals", "principal-type", "permissions", "conditions").contains(key)) {
                 throw invalid(
                         "Registry access does not support field '"
                                 + key
@@ -338,8 +343,12 @@ public final class DataAccessCompiler
             }
         }
 
-        Object usersValue = access.get(USERS_FIELD);
-        if (access.containsKey(USERS_FIELD)
+        if (access.containsKey(USERS_FIELD) && access.containsKey("principals")) {
+            throw invalid("Registry access must use either users or principals");
+        }
+        String principalsField = access.containsKey("principals") ? "principals" : USERS_FIELD;
+        Object usersValue = access.get(principalsField);
+        if (access.containsKey(principalsField)
                 && !(usersValue instanceof Iterable<?>)) {
             throw invalid(
                     "DataAccess access.users must be an array"
@@ -366,7 +375,7 @@ public final class DataAccessCompiler
         }
         Set<String> permissions =
                 parseRegistryPermissions(permissionValue);
-        if (!access.containsKey(USERS_FIELD)
+        if (!access.containsKey(principalsField)
                 || permissions.isEmpty()
                 || usernames.isEmpty()) {
             return Set.of();
@@ -375,10 +384,22 @@ public final class DataAccessCompiler
         permissions.forEach(permission ->
                 actionValues.add(Value.string(permission))
         );
-        Map<String, Value> attributes = Map.of(
-                "actions",
-                Value.set(actionValues)
-        );
+        Map<String, Value> attributes = new HashMap<>();
+        attributes.put("actions", Value.set(actionValues));
+        if (access.containsKey("principal-type")) {
+            Object type = access.get("principal-type");
+            if (!(type instanceof String name)
+                    || !Set.of("user", "service_account", "group", "anonymous").contains(name)) {
+                throw invalid("Unsupported Registry principal-type: " + type);
+            }
+            attributes.put("principal-type", Value.string(name));
+        }
+        if (access.containsKey("conditions")) {
+            if (!(access.get("conditions") instanceof Map<?, ?>)) {
+                throw invalid("Registry conditions must be an object");
+            }
+            attributes.put("conditions", valueParser.parse(access.get("conditions")));
+        }
 
         Set<Access> result = new HashSet<>();
         for (String username : usernames) {

@@ -1,7 +1,8 @@
 # PACT Artifact Keeper backend
 
-`pact-artifact-keeper` currently reconciles user permissions on Artifact Keeper
-repositories. Its configured backend instance is the authoritative source of
+`pact-artifact-keeper` reconciles Artifact Keeper permissions for all target
+types, including `repository`, `artifact`, `project`, `group`, `system`, and
+`global`. Its configured backend instance is the authoritative source of
 truth for the permissions returned by the Artifact Keeper `GET
 /api/v1/permissions` endpoint: a permission absent from PACT's desired state is
 deleted. The integration currently does not have a preserve-unmanaged mode.
@@ -9,8 +10,15 @@ Scope the configured Artifact Keeper instance accordingly.
 
 ## Current PACT model
 
-The Kubernetes `registry` resource maps to an Artifact Keeper repository. An
-access lists principals and the `read`, `write`, `delete`, and `admin` actions.
+The Kubernetes `registry: {name: repository-name}` form still maps to a
+repository. The generic `registry: {type: artifact, id: <UUID>}` form addresses
+any target type by its exact type string and UUID. In filesystem state, use
+`target: {repository: repository-name}` or `target: {type: artifact, id: <UUID>}`.
+PACT does not reinterpret `artifact` as a repository, or map arbitrary target IDs
+to repository names. The server accepts open target strings, so PACT also
+preserves unfamiliar target types.
+
+An access lists principals and the `read`, `write`, `delete`, and `admin` actions.
 PACT resolves usernames and repository names to Artifact Keeper IDs before
 creating permissions. Existing principals are classified using server account
 metadata, even when their username starts with `svc-`. The `current` profile
@@ -26,14 +34,47 @@ Within PACT, service-account grants always have the logical type
 Legacy `user`-typed grants naming a service account are normalized on read and
 preserved when their actions already match. Changing profiles does not force a
 rewrite of those grants. If both wire types exist, revocation deletes every
-matching permission ID. Other principal types and target types fail actual-state
-resolution before the permission diff. Missing or invalid account metadata
+matching permission ID. Missing or invalid account metadata
 (the flag in `current`, or the separate list in `legacy`) fails state loading
 instead of guessing an existing account's type.
 
-The HTTP permission API is more generic than the current PACT model: permission
-requests contain `principal_type`, `principal_id`, `target_type`, `target_id`,
-and `actions`, all represented by generic strings/IDs in the API.
+All four principal types are supported: `user`, `service_account`, `group`,
+and `anonymous`. Set `principal-type` in access attributes when needed;
+user/service-account classification for existing accounts still comes from
+server metadata. Group principals use group UUIDs, not names; PACT does not
+create groups or manage memberships. Anonymous principals use the nil UUID
+and may only grant `read` on repository or project targets.
+
+With `api-profile: current`, optional `conditions: {allowed_cidrs: [...]}`
+restricts a grant by client IP. PACT preserves these conditions when reading,
+diffing, creating, and compensating grants. Empty CIDR lists, malformed CIDRs,
+unknown condition keys, and conflicting conditions for the same principal and
+target are rejected. Anonymous and conditional desired grants require `current`.
+
+Example Kubernetes `DataAccess.spec`:
+
+```yaml
+resources:
+  - registry:
+      type: project
+      id: 11111111-1111-1111-1111-111111111111
+    access:
+      - principals: [22222222-2222-2222-2222-222222222222]
+        principal-type: group
+        permissions: [read]
+        conditions:
+          allowed_cidrs: [10.0.0.0/8]
+```
+
+Filesystem access uses `principal`, `resource.backendId`, `resource.target`,
+and `attributes` (`actions`, `principal-type`, and optional `conditions`), as
+shown in the [filesystem fixture](../integration/e2e/desired-state.yaml).
+
+Existing permissions of all target types participate in the normal authoritative
+diff, including deletion when absent from desired state. Add grants you intend
+to retain to desired state before upgrading; no manual deletion is needed to
+work around the former `Unsupported Artifact Keeper target type: artifact`
+error.
 
 ## API compatibility and configuration
 
@@ -96,8 +137,9 @@ The permission create/list JSON contract in PACT matches the tagged Artifact
 Keeper 1.5.1 server API: create uses `principal_type`, `principal_id`,
 `target_type`, `target_id`, and `actions`; list returns those fields under
 `items` and `pagination.total_pages`. The upstream request requires principal
-and target IDs to be UUIDs. PACT resolves names to IDs before creating
-permissions. A local HTTP contract test protects these field names and shapes.
+and target IDs to be UUIDs. PACT resolves names for repository/user references
+and forwards generic target UUIDs directly. Current-profile requests also carry
+`conditions` when present. Local HTTP contract tests protect these shapes.
 
 The CI compatibility matrix and opt-in live tests cover both releases above,
 including service-account creation, repeated reconciliation, grant revocation,
@@ -110,64 +152,31 @@ actual deployed release before extending the supported matrix.
 The original checked server implementation is pinned at
 [Artifact Keeper 1.5.1 permissions handler](https://github.com/artifact-keeper/artifact-keeper/blob/25d498934aca6887cf27726bfa3e2c748dbdeb8e/backend/src/api/handlers/permissions.rs).
 
-## Upstream capabilities and model roadmap
+## Target semantics
 
-The following capabilities were verified in the upstream Artifact Keeper
-backend source checked on 2026-10-05. These authorization capabilities are
-distinct from the permission API JSON schema above; their availability and
-behavior must still be validated against the deployed Artifact Keeper version
-before adding PACT support:
+Supporting permission CRUD does not change Artifact Keeper's enforcement rules:
 
-- **Repository scope** is used for content authorization.
-- **Project scope** exists, and project permissions can be inherited by
-  repositories assigned to that project.
-- **Group scope** is used for group administration and membership operations.
-- **System scope** is used for system-wide administrative checks. Upstream
-  represents it with target type `system` and a nil-UUID sentinel.
-- Upstream permission principal types include `user`, `service_account`,
-  `group`, and `anonymous`.
-- The migration documents `read`, `write`, `delete`, and `admin` actions.
-- Current backend source includes an optional `conditions.allowed_cidrs`
-  field. It is absent from the checked OpenAPI 1.10.1 spec, so it is
-  version-dependent.
+- Repository permissions govern repository content; project permissions can
+  be inherited by repositories assigned to that project.
+- A `group` target governs group administration. It does not add the principal
+  to that group. A `group` principal refers to the group's existing members.
+- System administrative checks use `type: system` with the nil UUID.
+- `artifact`, `global`, and unfamiliar targets round-trip through the permission
+  API. This does not establish that every content endpoint checks those grants,
+  or that `global` means access to all repositories. Use the server's documented
+  scope for the operation being authorized.
 
-Potential follow-up work for the PACT model:
-
-- Decide whether to expose project, group, and system targets in `DataAccess`
-  and whether they belong in a common hierarchy or separate target branches.
-- Decide which upstream principal types PACT should support, how group
-  membership affects effective access, and whether anonymous access is
-  appropriate for this product.
-- Verify and document per-artifact/package authorization. Upstream's original
-  permission schema names an `artifact` target and its generic resolver can
-  match arbitrary target strings, but an active individual-artifact
-  authorization enforcement path was not verified. Do not advertise
-  artifact-level access until that behavior is confirmed for supported server
-  versions.
-- Verify the exact action set and inheritance rules for each target type and
-  server version rather than assuming the repository action set applies
-  everywhere.
-- Evaluate `allowed_cidrs` and other conditional grants against the deployed
-  API version before defining a PACT contract.
-- Extend actual-state resolution and diffing to every supported principal and
-  target type before enabling full-scope reconciliation for that expanded
-  model. Unknown actual permission types currently cause reconciliation to
-  fail.
+The live suite checks create, read, update, repeated apply, and removal for every
+listed target type plus an unfamiliar target string. The current profile also
+checks conditions and group/anonymous principals. Content authorization
+with a service-account token is verified separately on a private repository.
+These CRUD checks do not claim individual-artifact enforcement.
 
 ## Primary references
 
-These links pin the source versions used for the capability inventory:
-
-- [Permission service: targets, principals, group/project inheritance and
-  conditions](https://github.com/artifact-keeper/artifact-keeper/blob/4ff21f54b21aa847d499a0fb95494f75eee9905a/backend/src/services/permission_service.rs)
-- [Permission handlers: CRUD validation and authorization](https://github.com/artifact-keeper/artifact-keeper/blob/4ff21f54b21aa847d499a0fb95494f75eee9905a/backend/src/api/handlers/permissions.rs)
-- [Project permission checks](https://github.com/artifact-keeper/artifact-keeper/blob/4ff21f54b21aa847d499a0fb95494f75eee9905a/backend/src/api/handlers/projects.rs)
-- [Group permission checks](https://github.com/artifact-keeper/artifact-keeper/blob/4ff21f54b21aa847d499a0fb95494f75eee9905a/backend/src/api/handlers/groups.rs)
-- [Original permission-target schema](https://github.com/artifact-keeper/artifact-keeper/blob/4ff21f54b21aa847d499a0fb95494f75eee9905a/backend/migrations/018_groups_permissions.sql)
-- [Artifact Keeper API OpenAPI specification](https://github.com/artifact-keeper/artifact-keeper-api/blob/17593394ca921fe3c864e795244af8a0562a456a/openapi.yaml)
-
-The OpenAPI specification is version 1.10.1 and does not define an enum for
-`target_type`; an open string field does not prove that a particular target
-type is enforced by the service. Confirm capabilities and destructive
-reconciliation behavior against the exact server release before expanding
-PACT's model.
+- [1.11.1 permission service: principal validation, target matching, project
+  inheritance and conditions](https://github.com/artifact-keeper/artifact-keeper/blob/v1.11.1/backend/src/services/permission_service.rs)
+- [1.11.1 permission handlers](https://github.com/artifact-keeper/artifact-keeper/blob/v1.11.1/backend/src/api/handlers/permissions.rs)
+- [1.11.1 group administration](https://github.com/artifact-keeper/artifact-keeper/blob/v1.11.1/backend/src/api/handlers/groups.rs)
+- [Project permission inheritance](https://artifactkeeper.com/docs/advanced/projects/)
+- [Service-account access and group-target distinction](https://artifactkeeper.com/docs/advanced/service-account-access/)

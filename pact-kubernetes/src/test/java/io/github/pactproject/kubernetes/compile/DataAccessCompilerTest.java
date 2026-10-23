@@ -623,6 +623,37 @@ class DataAccessCompilerTest
     }
 
     @Test
+    void compilesTypedRegistryTargetAndGroupPrincipalWithConditions() {
+        String id = "11111111-1111-1111-1111-111111111111";
+        String group = "22222222-2222-2222-2222-222222222222";
+        PactState state = compiler.compile(List.of(Map.of("resources", List.of(Map.of(
+                "registry", Map.of("type", "project", "id", id),
+                "access", List.of(Map.of(
+                        "principals", List.of(group), "principal-type", "group",
+                        "permissions", List.of("read"),
+                        "conditions", Map.of("allowed_cidrs", List.of("10.0.0.0/8"))
+                ))
+        )))));
+        Access access = state.accesses().iterator().next();
+        assertEquals(group, access.principal());
+        assertEquals(Map.of("type", "project", "id", id), access.resource().target());
+        assertEquals(new StringValue("group"), access.attributes().get("principal-type"));
+        assertEquals(new ObjectValue(Map.of("allowed_cidrs", new SetValue(Set.of(
+                new StringValue("10.0.0.0/8"))))), access.attributes().get("conditions"));
+    }
+
+    @Test
+    void rejectsAmbiguousRegistryTargetAndPrincipalFields() {
+        assertThrows(IllegalArgumentException.class, () -> compiler.compile(List.of(Map.of(
+                "resources", List.of(Map.of("registry", Map.of("name", "repo", "type", "artifact"),
+                        "access", List.of()))))));
+        assertThrows(IllegalArgumentException.class, () -> compiler.compile(List.of(Map.of(
+                "resources", List.of(Map.of("registry", Map.of("name", "repo"), "access", List.of(Map.of(
+                        "users", List.of("alice"), "principals", List.of("alice"),
+                        "permissions", List.of("read")))))))));
+    }
+
+    @Test
     void rejectsEmptyAndNestedTargetLists()
     {
         assertThrows(

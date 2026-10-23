@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import io.github.pactproject.api.value.Value;
 
 public final class ArtifactKeeperDiff {
 
@@ -57,10 +58,10 @@ public final class ArtifactKeeperDiff {
 
         for (ActualArtifactKeeperPermission permission : permissions) {
             Key key = new Key(
-                    permission.repository(),
+                    permission.targetType(), permission.target(),
                     permission.principalType(),
-                    permission.username(),
-                    sortedActions(permission.actions())
+                    permission.principal(),
+                    sortedActions(permission.actions()), permission.conditions()
             );
 
             // Legacy and current wire types can normalize to the same logical
@@ -78,10 +79,10 @@ public final class ArtifactKeeperDiff {
 
         for (ArtifactKeeperPermission permission : permissions) {
             Key key = new Key(
-                    permission.repository(),
+                    permission.targetType(), permission.target(),
                     permission.principalType(),
-                    permission.username(),
-                    sortedActions(permission.actions())
+                    permission.principal(),
+                    sortedActions(permission.actions()), permission.conditions()
             );
 
             result.merge(
@@ -99,10 +100,10 @@ public final class ArtifactKeeperDiff {
             ArtifactKeeperPermission second
     ) {
         return new ArtifactKeeperPermission(
-                first.repository(),
+                first.targetType(), first.target(), first.targetById(),
                 first.principalType(),
-                first.username(),
-                union(first.actions(), second.actions())
+                first.principal(),
+                union(first.actions(), second.actions()), first.conditions()
         );
     }
 
@@ -120,10 +121,11 @@ public final class ArtifactKeeperDiff {
     }
 
     private record Key(
-            String repository,
+            String targetType, String target,
             String principalType,
-            String username,
-            List<String> actions
+            String principal,
+            List<String> actions,
+            Map<String, Value> conditions
     ) {
     }
 

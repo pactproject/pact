@@ -23,35 +23,34 @@ public final class ArtifactKeeperResolver {
             ArtifactKeeperState state,
             ArtifactKeeperApiPermission permission
     ) {
-        if (!"user".equals(permission.principalType())
-                && !"service_account".equals(permission.principalType())) {
+        if (!java.util.Set.of("user", "service_account", "group", "anonymous").contains(permission.principalType())) {
             throw new IllegalArgumentException(
                     "Unsupported Artifact Keeper principal type: "
                             + permission.principalType()
             );
         }
 
-        if (!"repository".equals(permission.targetType())) {
-            throw new IllegalArgumentException(
-                    "Unsupported Artifact Keeper target type: "
-                            + permission.targetType()
-            );
+        String principal = permission.principalId();
+        String principalType = permission.principalType();
+        if (principalType.equals("user") || principalType.equals("service_account")) {
+            var user = state.userById(principal);
+            if (principalType.equals("service_account") && !user.serviceAccount()) {
+                throw new IllegalArgumentException(
+                        "Artifact Keeper service_account permission names a human user: " + user.id());
+            }
+            principal = user.username();
+            principalType = user.principalType();
+        } else if (principalType.equals("anonymous") && !ArtifactKeeperCompiler.NIL_ID.equals(principal)) {
+            throw new IllegalArgumentException("Anonymous principal must have the nil UUID");
         }
-
-        var user = state.userById(permission.principalId());
-        if ("service_account".equals(permission.principalType()) && !user.serviceAccount()) {
-            throw new IllegalArgumentException(
-                    "Artifact Keeper service_account permission names a human user: " + user.id()
-            );
-        }
-        var repository = state.repositoryById(permission.targetId());
+        String target = permission.targetType().equals("repository")
+                ? state.repositoryById(permission.targetId()).name() : permission.targetId();
 
         return new ActualArtifactKeeperPermission(
                 permission.id(),
-                repository.name(),
-                user.principalType(),
-                user.username(),
-                permission.actions()
+                permission.targetType(), target,
+                principalType, principal,
+                permission.actions(), permission.conditions()
         );
     }
 }

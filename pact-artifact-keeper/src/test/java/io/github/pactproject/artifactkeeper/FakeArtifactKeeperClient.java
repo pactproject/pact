@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Map;
+import io.github.pactproject.api.value.Value;
 
 final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
 
@@ -59,6 +61,13 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
             String targetId,
             Set<String> actions
     ) throws ArtifactKeeperClientException {
+        return createPermission(principalType, principalId, targetType, targetId, actions, Map.of());
+    }
+
+    @Override
+    public ArtifactKeeperApiPermission createPermission(
+            String principalType, String principalId, String targetType, String targetId,
+            Set<String> actions, Map<String, Value> conditions) throws ArtifactKeeperClientException {
         createPermissionCalls++;
 
         if (failNextCreatePermission) {
@@ -80,7 +89,7 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
                         principalId,
                         targetType,
                         targetId,
-                        Set.copyOf(actions)
+                        Set.copyOf(actions), conditions
                 );
 
         permissions.add(permission);

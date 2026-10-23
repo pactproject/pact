@@ -10,6 +10,7 @@ import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperClient;
+import io.github.pactproject.api.value.*;
 
 import java.io.IOException;
 import java.net.URI;
@@ -24,6 +25,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Set;
 
 public final class ArtifactKeeperHttpClient
@@ -161,6 +164,13 @@ public final class ArtifactKeeperHttpClient
             String targetId,
             Set<String> actions
     ) throws ArtifactKeeperClientException {
+        return createPermission(principalType, principalId, targetType, targetId, actions, Map.of());
+    }
+
+    @Override
+    public ArtifactKeeperApiPermission createPermission(
+            String principalType, String principalId, String targetType, String targetId,
+            Set<String> actions, Map<String, Value> conditions) throws ArtifactKeeperClientException {
         ObjectNode body = objectMapper.createObjectNode();
 
         body.put("principal_type", principalType);
@@ -171,6 +181,9 @@ public final class ArtifactKeeperHttpClient
                 "actions",
                 objectMapper.valueToTree(actions)
         );
+        if (!conditions.isEmpty()) {
+            body.set("conditions", conditionNode(Value.object(conditions)));
+        }
 
         JsonNode response = request(
                 "POST",
@@ -320,8 +333,55 @@ public final class ArtifactKeeperHttpClient
                 text(node, "principal_id"),
                 text(node, "target_type"),
                 text(node, "target_id"),
-                actions
+                actions, readConditions(node.path("conditions"))
         );
+    }
+
+    private Map<String, Value> readConditions(JsonNode node) throws ArtifactKeeperClientException {
+        if (node.isMissingNode() || node.isNull()) return Map.of();
+        if (!(conditionValue(node) instanceof ObjectValue object)) {
+            throw new ArtifactKeeperClientException("Artifact Keeper conditions must be an object");
+        }
+        return Map.copyOf(object.values());
+    }
+
+    private Value conditionValue(JsonNode node) throws ArtifactKeeperClientException {
+        if (node.isTextual()) return Value.string(node.textValue());
+        if (node.isBoolean()) return Value.bool(node.booleanValue());
+        if (node.isNumber()) return Value.number(node.decimalValue());
+        if (node.isArray()) {
+            Set<Value> values = new HashSet<>();
+            for (JsonNode item : node) values.add(conditionValue(item));
+            return Value.set(values);
+        }
+        if (node.isObject()) {
+            Map<String, Value> values = new HashMap<>();
+            var fields = node.fields();
+            while (fields.hasNext()) {
+                var field = fields.next();
+                values.put(field.getKey(), conditionValue(field.getValue()));
+            }
+            return Value.object(values);
+        }
+        throw new ArtifactKeeperClientException("Unsupported Artifact Keeper condition value: " + node);
+    }
+
+    private JsonNode conditionNode(Value value) {
+        return switch (value) {
+            case StringValue string -> objectMapper.valueToTree(string.value());
+            case BooleanValue bool -> objectMapper.valueToTree(bool.value());
+            case NumberValue number -> objectMapper.valueToTree(number.value());
+            case SetValue set -> {
+                var array = objectMapper.createArrayNode();
+                set.values().forEach(item -> array.add(conditionNode(item)));
+                yield array;
+            }
+            case ObjectValue object -> {
+                var node = objectMapper.createObjectNode();
+                object.values().forEach((key, item) -> node.set(key, conditionNode(item)));
+                yield node;
+            }
+        };
     }
 
     private JsonNode request(

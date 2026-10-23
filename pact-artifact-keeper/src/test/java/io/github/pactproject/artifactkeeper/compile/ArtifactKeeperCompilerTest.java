@@ -7,6 +7,8 @@ import io.github.pactproject.api.value.Value;
 import io.github.pactproject.artifactkeeper.model.ArtifactKeeperPermission;
 import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperCompiler;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -199,6 +201,54 @@ class ArtifactKeeperCompilerTest {
                         )
                 )
         );
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not-a-uuid", "1-1-1-1-1", "", "https://example.org"})
+    void rejectsInvalidTargetIds(String id) {
+        assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(new PactState(Set.of(
+                new Access("alice", new Resource("registry", Map.of("type", "artifact", "id", id)),
+                        access("alice", Set.of("read")).attributes())))));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"10.0.0.0/33", "256.0.0.1/8", "example.org/24", "::/129", "10.0.0/8"})
+    void rejectsInvalidCidrs(String cidr) {
+        assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(new PactState(Set.of(
+                withConditions(Map.of("allowed_cidrs", Value.set(Set.of(Value.string(cidr)))))))));
+    }
+
+    @Test
+    void validatesConditionsAndDetectsConflictingRules() {
+        for (var conditions : List.of(
+                Map.of("allowed_cidrs", Value.set(Set.of())),
+                Map.of("allowed_cidrs", Value.string("10.0.0.0/8")),
+                Map.of("unknown_condition", Value.string("value")))) {
+            assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(new PactState(Set.of(
+                    withConditions(Map.copyOf(conditions))))));
+        }
+        var conditional = withConditions(Map.of("allowed_cidrs", Value.set(Set.of(
+                Value.string("10.0.0.0/8"), Value.string("2001:db8::/32")))));
+        assertEquals(1, ArtifactKeeperCompiler.compile(new PactState(Set.of(conditional))).size());
+        assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(new PactState(Set.of(
+                conditional, access("alice", Set.of("write"))))));
+    }
+
+    @Test
+    void restrictsAnonymousGrantsToReadOnRepositoriesAndProjects() {
+        for (var target : List.of(Map.of("repository", "repo"), Map.of("type", "artifact", "id",
+                "11111111-1111-1111-1111-111111111111"))) {
+            var anonymousWrite = new Access("anonymous", new Resource("registry", target), Map.of(
+                    "principal-type", Value.string("anonymous"),
+                    "actions", Value.set(Set.of(Value.string("write")))));
+            assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(
+                    new PactState(Set.of(anonymousWrite))));
+        }
+    }
+
+    private static Access withConditions(Map<String, Value> conditions) {
+        return new Access("alice", REPOSITORY, Map.of(
+                "actions", Value.set(Set.of(Value.string("read"))), "conditions", Value.object(conditions)));
     }
 
     private static ArtifactKeeperPermission permission(

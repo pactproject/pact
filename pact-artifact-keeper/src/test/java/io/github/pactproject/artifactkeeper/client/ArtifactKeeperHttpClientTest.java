@@ -7,6 +7,7 @@ import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
 import io.github.pactproject.artifactkeeper.ArtifactKeeperApiProfile;
 import io.github.pactproject.artifactkeeper.ArtifactKeeperConfig;
+import io.github.pactproject.api.value.Value;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -15,6 +16,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -24,6 +26,46 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ArtifactKeeperHttpClientTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void roundTripsTypedPermissionWithConditions() throws Exception, ArtifactKeeperClientException {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<JsonNode> posted = new AtomicReference<>();
+        server.createContext("/api/v1/permissions", exchange -> {
+            JsonNode response;
+            if (exchange.getRequestMethod().equals("POST")) {
+                posted.set(MAPPER.readTree(exchange.getRequestBody()));
+                response = ((com.fasterxml.jackson.databind.node.ObjectNode) posted.get()).deepCopy()
+                        .put("id", "permission");
+            } else {
+                response = MAPPER.createObjectNode().set("items", MAPPER.createArrayNode().add(
+                        ((com.fasterxml.jackson.databind.node.ObjectNode) posted.get()).deepCopy()
+                                .put("id", "permission")));
+                ((com.fasterxml.jackson.databind.node.ObjectNode) response).set("pagination",
+                        MAPPER.createObjectNode().put("total_pages", 1));
+            }
+            byte[] body = MAPPER.writeValueAsBytes(response);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new ArtifactKeeperHttpClient(new ArtifactKeeperConfig(
+                    java.net.URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "test-token", 100, ArtifactKeeperApiProfile.CURRENT));
+            var conditions = Map.<String, Value>of("allowed_cidrs",
+                    Value.set(Set.of(Value.string("10.0.0.0/8"))));
+            var created = client.createPermission("group", "principal", "artifact", "target", Set.of("read"), conditions);
+            assertEquals("artifact", posted.get().path("target_type").asText());
+            assertEquals("target", posted.get().path("target_id").asText());
+            assertEquals(MAPPER.readTree("{\"allowed_cidrs\":[\"10.0.0.0/8\"]}"), posted.get().path("conditions"));
+            assertEquals(conditions, created.conditions());
+            assertEquals(List.of(created), client.getPermissions());
+        } finally {
+            server.stop(0);
+        }
+    }
 
     @ParameterizedTest
     @EnumSource(ArtifactKeeperApiProfile.class)

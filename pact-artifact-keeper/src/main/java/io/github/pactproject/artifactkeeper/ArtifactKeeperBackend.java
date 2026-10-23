@@ -134,24 +134,42 @@ public final class ArtifactKeeperBackend
     {
         var resolved = new ArrayList<ArtifactKeeperPermission>();
         for (ArtifactKeeperPermission permission : desired) {
-            repositoryByName(permission.repository());
-            String principalType;
-            try {
-                principalType = state.userByUsername(permission.username()).principalType();
-            }
-            catch (IllegalArgumentException e) {
-                if (!permission.username().startsWith("svc-")) {
-                    throw new ValidationException(
-                            "Artifact Keeper user not found: " + permission.username(), e
-                    );
+            String target = permission.target();
+            boolean targetById = permission.targetById();
+            if (permission.targetType().equals("repository")) {
+                try {
+                    target = targetById ? state.repositoryById(target).name() : repositoryByName(target).name();
+                } catch (IllegalArgumentException e) {
+                    throw new ValidationException(e.getMessage(), e);
                 }
-                principalType = "service_account";
+                targetById = false;
+            }
+            String principalType = permission.principalType();
+            if (principalType.equals("user") || principalType.equals("service_account")) {
+                try {
+                    principalType = state.userByUsername(permission.principal()).principalType();
+                }
+                catch (IllegalArgumentException e) {
+                    if (!permission.principal().startsWith("svc-")) {
+                        throw new ValidationException("Artifact Keeper user not found: " + permission.principal(), e);
+                    }
+                    principalType = "service_account";
+                }
+            }
+            if (apiProfile == ArtifactKeeperApiProfile.LEGACY
+                    && (!permission.conditions().isEmpty() || principalType.equals("anonymous"))) {
+                throw new ValidationException("Anonymous and conditional grants require Artifact Keeper api-profile=current");
             }
             resolved.add(new ArtifactKeeperPermission(
-                    permission.repository(), principalType, permission.username(), permission.actions()
+                    permission.targetType(), target, targetById, principalType, permission.principal(),
+                    permission.actions(), permission.conditions()
             ));
         }
-        return List.copyOf(resolved);
+        try {
+            return ArtifactKeeperCompiler.merge(resolved);
+        } catch (IllegalArgumentException e) {
+            throw new ValidationException(e.getMessage(), e);
+        }
     }
 
     private List<ActualArtifactKeeperPermission> resolveActualState()
@@ -220,24 +238,25 @@ public final class ArtifactKeeperBackend
             ArtifactKeeperPermission permission)
             throws BackendOperationException, ValidationException
     {
-        ArtifactKeeperApiUser user =
-                findOrCreateUser(
-                        permission.username()
-                );
-
-        ArtifactKeeperApiRepository repository =
-                repositoryByName(
-                        permission.repository()
-                );
+        String principalType = permission.principalType();
+        String principalId = permission.principal();
+        if (principalType.equals("user") || principalType.equals("service_account")) {
+            ArtifactKeeperApiUser user = findOrCreateUser(permission.principal());
+            principalId = user.id();
+            principalType = user.principalType();
+        }
+        String targetId = permission.targetType().equals("repository")
+                ? repositoryByName(permission.target()).id() : permission.target();
 
         try {
             ArtifactKeeperApiPermission created =
                     client.createPermission(
-                            apiProfile.permissionPrincipalType(user.principalType()),
-                            user.id(),
-                            "repository",
-                            repository.id(),
-                            permission.actions()
+                            apiProfile.permissionPrincipalType(principalType),
+                            principalId,
+                            permission.targetType(),
+                            targetId,
+                            permission.actions(),
+                            permission.conditions()
                     );
 
             state = state.addPermission(created);

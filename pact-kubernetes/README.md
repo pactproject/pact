@@ -34,6 +34,11 @@ The Artifact Keeper backend configured in PACT must have id `registry`, which
 is the service name used by `DataAccess.spec.resources`. Registry locations
 with `name` are translated to Artifact Keeper repository targets, and
 `permissions` are translated to backend `actions`.
+Use `registry: {type: artifact, id: <UUID>}` for an arbitrary Artifact Keeper
+target. Registry access also accepts `principals` instead of `users`, an explicit
+`principal-type` (`user`, `service_account`, `group`, or `anonymous`), and
+`conditions: {allowed_cidrs: [...]}` with the current API profile. Group
+principals must be UUIDs. See the [Artifact Keeper model and examples](../pact-artifact-keeper/README.md).
 
 ### PostgreSQL identities
 

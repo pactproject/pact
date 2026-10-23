@@ -105,7 +105,7 @@ class ArtifactKeeperResolverTest {
                 List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),
                 List.of(new ArtifactKeeperApiPermission(
                         "permission-1",
-                        "group",
+                        "unsupported_principal",
                         "user-1",
                         "repository",
                         "repo-1",
@@ -119,13 +119,13 @@ class ArtifactKeeperResolverTest {
         );
 
         assertEquals(
-                "Unsupported Artifact Keeper principal type: group",
+                "Unsupported Artifact Keeper principal type: unsupported_principal",
                 exception.getMessage()
         );
     }
 
     @Test
-    void rejectsUnsupportedTargetType() {
+    void resolvesProjectTargetWithoutTreatingItAsRepository() {
         var state = new ArtifactKeeperState(
                 List.of(new ArtifactKeeperApiUser("user-1", "alice")),
                 List.of(new ArtifactKeeperApiRepository("repo-1", "repository-a")),
@@ -139,15 +139,9 @@ class ArtifactKeeperResolverTest {
                 ))
         );
 
-        var exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> ArtifactKeeperResolver.resolve(state)
-        );
-
-        assertEquals(
-                "Unsupported Artifact Keeper target type: project",
-                exception.getMessage()
-        );
+        var permission = ArtifactKeeperResolver.resolve(state).getFirst();
+        assertEquals("project", permission.targetType());
+        assertEquals("repo-1", permission.target());
     }
 
     @Test

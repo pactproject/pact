@@ -138,6 +138,10 @@ owned PACT role and then the user itself.
 Artifact Keeper compatibility CI runs the exact pairs `1.5.1` / `legacy` and
 `1.11.1` / `current`. Each job uses its own disposable database and tests
 service-account creation, private repository access, idempotency, and revocation.
+Both profiles also exercise permission CRUD for repository, artifact, project,
+group, system, global, and an unfamiliar target type. The current profile adds
+CIDR-condition round trips and group/anonymous principal tests. These generic
+CRUD tests do not assert artifact-level content enforcement.
 To choose the newer pair locally, set these values in `integration/.env` before
 starting a fresh Compose project:
 
@@ -180,6 +184,12 @@ docker compose --env-file .\integration\.env -f .\integration\compose.yaml `
   --profile e2e run --rm pact-e2e
 ```
 
-The end-to-end command returns a failure if either apply or cleanup fails.
+The end-to-end command applies desired and empty state through the same
+`PactApplication` instance, retaining the core's previous state so cleanup
+actually reconciles removals. It returns a failure if apply or cleanup fails,
+or if repository permissions, managed Ranger policies, or explicit PostgreSQL
+fixture grants remain afterward. Two independent one-shot processes cannot
+test this transition because the filesystem provider does not persist applied
+state across process restarts.
 The PostgreSQL Maven live test runs as part of the `tests` profile and creates
 its own temporary database and identity on the Compose PostgreSQL service.
