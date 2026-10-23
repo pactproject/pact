@@ -115,6 +115,42 @@ class ArtifactKeeperLiveIntegrationTest {
     }
 
     @Test
+    void preservesCustomBackendNameAndMixedHumanAndServiceAccountAccess()
+            throws Exception, ArtifactKeeperClientException {
+        var config = config(100);
+        var client = new ArtifactKeeperHttpClient(config);
+        assertTrue(client.getPermissions().isEmpty(), "Use a dedicated instance");
+        String human = required("PACT_IT_ARTIFACT_KEEPER_USER");
+        String serviceAccount = "svc-pact-it-compat-" + UUID.randomUUID().toString().replace("-", "");
+        String repository = required("PACT_IT_ARTIFACT_KEEPER_REPOSITORY");
+        var desired = new PactState(Set.of(human, serviceAccount).stream().map(principal -> new Access(
+                principal, new Resource("company-registry", Map.of("name", repository)),
+                Map.of("permissions", Value.set(Set.of(Value.string("read"))))
+        )).collect(Collectors.toSet()));
+        var backend = new ArtifactKeeperBackend("company-registry", client, config.apiProfile());
+        try {
+            backend.apply(desired);
+            var grants = client.getPermissions();
+            assertEquals(2, grants.size());
+            String repositoryId = repositoryId(client, repository);
+            assertTrue(grants.stream().allMatch(p -> p.targetType().equals("repository")
+                    && p.targetId().equals(repositoryId)));
+            var users = client.getUsers();
+            for (var name : List.of(human, serviceAccount)) {
+                var account = users.stream().filter(u -> u.username().equals(name)).findFirst().orElseThrow();
+                assertEquals(name.equals(serviceAccount), account.serviceAccount());
+                assertEquals(name.equals(serviceAccount) ? config.apiProfile().permissionPrincipalType("service_account") : "user",
+                        grants.stream().filter(p -> p.principalId().equals(account.id())).findFirst().orElseThrow().principalType());
+            }
+            backend.apply(desired);
+            assertEquals(grants, client.getPermissions());
+        } finally {
+            backend.apply(PactState.empty());
+        }
+        assertTrue(client.getPermissions().isEmpty());
+    }
+
+    @Test
     void reconcilesRepositoryPermissionsAgainstLiveApi()
             throws Exception, ArtifactKeeperClientException {
         ArtifactKeeperConfig config = config(100);

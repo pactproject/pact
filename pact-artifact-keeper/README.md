@@ -18,6 +18,22 @@ PACT does not reinterpret `artifact` as a repository, or map arbitrary target ID
 to repository names. The server accepts open target strings, so PACT also
 preserves unfamiliar target types.
 
+The existing `<backend_id>.name` form works with any configured Artifact Keeper
+backend ID, and `users` can mix human names and `svc-*` service accounts without
+adding `principal-type`. For example:
+
+```yaml
+resources:
+  - company-registry:
+      name: repository-a
+    access:
+      - users: [alice, svc-build]
+        permissions: [read]
+```
+
+The backend accepts `name` as a repository-name alias and `permissions` as an
+`actions` alias. Conflicting `actions` and `permissions` are rejected.
+
 An access lists principals and the `read`, `write`, `delete`, and `admin` actions.
 PACT resolves usernames and repository names to Artifact Keeper IDs before
 creating permissions. Existing principals are classified using server account

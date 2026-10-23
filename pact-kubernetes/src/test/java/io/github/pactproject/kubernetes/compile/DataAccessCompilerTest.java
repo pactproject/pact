@@ -643,6 +643,22 @@ class DataAccessCompilerTest
     }
 
     @Test
+    void preservesCustomBackendNameAndMixedUsersWithoutExplicitPrincipalTypes() {
+        var state = compiler.compile(List.of(Map.of("resources", List.of(Map.of(
+                "company-registry", Map.of("name", "repository-a"),
+                "access", List.of(Map.of("users", List.of("alice", "svc-build"),
+                        "permissions", List.of("read")))
+        )))));
+        assertEquals(Set.of("alice", "svc-build"), state.accesses().stream()
+                .map(Access::principal).collect(java.util.stream.Collectors.toSet()));
+        assertTrue(state.accesses().stream().allMatch(access ->
+                access.resource().backendId().equals("company-registry")
+                        && access.resource().target().equals(Map.of("name", "repository-a"))
+                        && access.attributes().equals(Map.of("permissions",
+                        new SetValue(Set.of(new StringValue("read")))))));
+    }
+
+    @Test
     void rejectsAmbiguousRegistryTargetAndPrincipalFields() {
         assertThrows(IllegalArgumentException.class, () -> compiler.compile(List.of(Map.of(
                 "resources", List.of(Map.of("registry", Map.of("name", "repo", "type", "artifact"),

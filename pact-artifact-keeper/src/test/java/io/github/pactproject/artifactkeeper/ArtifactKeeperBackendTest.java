@@ -593,6 +593,33 @@ class ArtifactKeeperBackendTest {
         assertEquals(conditions, client.getPermissions().getFirst().conditions());
     }
 
+    @ParameterizedTest
+    @EnumSource(ArtifactKeeperApiProfile.class)
+    void preservesNamedRepositoryAndMixedUsersForCustomBackendId(ArtifactKeeperApiProfile profile) throws Exception {
+        var client = client(List.of(ALICE), List.of(REPOSITORY), List.of());
+        var backend = new ArtifactKeeperBackend("company-registry", client, profile);
+        var desired = new PactState(Set.of("alice", "svc-build").stream().map(principal -> new Access(
+                principal, new Resource("company-registry", Map.of("name", REPOSITORY.name())),
+                Map.of("permissions", Value.set(Set.of(Value.string("read"))))
+        )).collect(java.util.stream.Collectors.toSet()));
+        backend.apply(desired);
+        assertEquals(1, client.createServiceAccountCalls());
+        var grants = client.getPermissions();
+        assertEquals(2, grants.size());
+        assertTrue(grants.stream().allMatch(p -> p.targetType().equals("repository")
+                && p.targetId().equals(REPOSITORY.id())));
+        assertEquals("user", grants.stream().filter(p -> p.principalId().equals(ALICE.id()))
+                .findFirst().orElseThrow().principalType());
+        var account = client.getUsers().stream().filter(u -> u.username().equals("svc-build")).findFirst().orElseThrow();
+        assertEquals(profile.permissionPrincipalType("service_account"), grants.stream()
+                .filter(p -> p.principalId().equals(account.id())).findFirst().orElseThrow().principalType());
+        backend.apply(desired);
+        assertEquals(grants, client.getPermissions());
+        assertEquals(1, client.createServiceAccountCalls());
+        backend.apply(PactState.empty());
+        assertTrue(client.getPermissions().isEmpty());
+    }
+
     private static PactState typedState(String principal, String principalType, String type, String id,
                                         Set<String> actions, Map<String, Value> conditions) {
         return state(new Access(principal, new Resource("ak", Map.of("type", type, "id", id)), Map.of(

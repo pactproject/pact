@@ -30,15 +30,19 @@ The Fabric8 client uses its normal Kubernetes configuration, including the
 in-cluster service account when running in Kubernetes. The configured resource
 is expected to be namespace-scoped and to expose the `status` subresource.
 
-The Artifact Keeper backend configured in PACT must have id `registry`, which
-is the service name used by `DataAccess.spec.resources`. Registry locations
-with `name` are translated to Artifact Keeper repository targets, and
-`permissions` are translated to backend `actions`.
+Use the configured Artifact Keeper backend ID as the key in
+`DataAccess.spec.resources`. A location with `name` identifies a repository;
+`access.users` can mix human usernames and `svc-*` service accounts, with no
+explicit principal type required. The backend accepts the generic compiler's
+`name` / `permissions` representation as well as `registry`'s normalized
+`repository` / `actions` form.
 Use `registry: {type: artifact, id: <UUID>}` for an arbitrary Artifact Keeper
 target. Registry access also accepts `principals` instead of `users`, an explicit
 `principal-type` (`user`, `service_account`, `group`, or `anonymous`), and
 `conditions: {allowed_cidrs: [...]}` with the current API profile. Group
 principals must be UUIDs. See the [Artifact Keeper model and examples](../pact-artifact-keeper/README.md).
+For a custom backend ID, use `users` for principal names/IDs; the `principals`
+alias is supplied by the specialized `registry` compiler.
 
 ### PostgreSQL identities
 

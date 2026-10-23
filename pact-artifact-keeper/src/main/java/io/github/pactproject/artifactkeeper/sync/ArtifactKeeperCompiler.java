@@ -32,11 +32,13 @@ public final class ArtifactKeeperCompiler {
             Resource resource = access.resource();
 
             boolean byId = resource.target().keySet().equals(Set.of("type", "id"));
-            if (!byId && !resource.target().keySet().equals(Set.of("repository"))) {
-                throw new IllegalArgumentException("Artifact Keeper target must contain repository, or type and id");
+            boolean byName = resource.target().keySet().equals(Set.of("name"));
+            if (!byId && !byName && !resource.target().keySet().equals(Set.of("repository"))) {
+                throw new IllegalArgumentException("Artifact Keeper target must contain repository/name, or type and id");
             }
             String targetType = byId ? requireTarget(resource, "type") : "repository";
-            String target = byId ? uuid(requireTarget(resource, "id")) : requireTarget(resource, "repository");
+            String target = byId ? uuid(requireTarget(resource, "id"))
+                    : requireTarget(resource, byName ? "name" : "repository");
             Set<String> actions = extractActions(access.attributes());
 
             if (actions.isEmpty()) {
@@ -179,7 +181,12 @@ public final class ArtifactKeeperCompiler {
     private static Set<String> extractActions(
             Map<String, Value> attributes
     ) {
-        Value value = attributes.get(ACTIONS_ATTRIBUTE);
+        Value actionsValue = attributes.get(ACTIONS_ATTRIBUTE);
+        Value permissionsValue = attributes.get("permissions");
+        if (actionsValue != null && permissionsValue != null && !actionsValue.equals(permissionsValue)) {
+            throw new IllegalArgumentException("Conflicting Artifact Keeper actions and permissions attributes");
+        }
+        Value value = actionsValue != null ? actionsValue : permissionsValue;
 
         if (value == null) {
             return Set.of();
