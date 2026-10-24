@@ -16,10 +16,10 @@ import io.github.pactproject.artifactkeeper.model.ArtifactKeeperState;
 import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperCompiler;
 import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperDiff;
 import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperResolver;
+import io.github.pactproject.artifactkeeper.sync.ArtifactKeeperReferenceResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -130,45 +130,14 @@ public final class ArtifactKeeperBackend
     }
 
     private List<ArtifactKeeperPermission> resolveDesiredState(
-            List<ArtifactKeeperPermission> desired) throws ValidationException
+            List<ArtifactKeeperPermission> desired) throws ValidationException, BackendOperationException
     {
-        var resolved = new ArrayList<ArtifactKeeperPermission>();
-        for (ArtifactKeeperPermission permission : desired) {
-            String target = permission.target();
-            boolean targetById = permission.targetById();
-            if (permission.targetType().equals("repository")) {
-                try {
-                    target = targetById ? state.repositoryById(target).name() : repositoryByName(target).name();
-                } catch (IllegalArgumentException e) {
-                    throw new ValidationException(e.getMessage(), e);
-                }
-                targetById = false;
-            }
-            String principalType = permission.principalType();
-            if (principalType.equals("user") || principalType.equals("service_account")) {
-                try {
-                    principalType = state.userByUsername(permission.principal()).principalType();
-                }
-                catch (IllegalArgumentException e) {
-                    if (!permission.principal().startsWith("svc-")) {
-                        throw new ValidationException("Artifact Keeper user not found: " + permission.principal(), e);
-                    }
-                    principalType = "service_account";
-                }
-            }
-            if (apiProfile == ArtifactKeeperApiProfile.LEGACY
-                    && (!permission.conditions().isEmpty() || principalType.equals("anonymous"))) {
-                throw new ValidationException("Anonymous and conditional grants require Artifact Keeper api-profile=current");
-            }
-            resolved.add(new ArtifactKeeperPermission(
-                    permission.targetType(), target, targetById, principalType, permission.principal(),
-                    permission.actions(), permission.conditions()
-            ));
-        }
         try {
-            return ArtifactKeeperCompiler.merge(resolved);
+            return new ArtifactKeeperReferenceResolver(state, client, apiProfile).resolve(desired);
         } catch (IllegalArgumentException e) {
             throw new ValidationException(e.getMessage(), e);
+        } catch (ArtifactKeeperClientException e) {
+            throw new BackendOperationException("Failed to resolve Artifact Keeper references", e);
         }
     }
 
@@ -331,7 +300,7 @@ public final class ArtifactKeeperBackend
             throws ValidationException
     {
         try {
-            return state.repositoryByName(name);
+            return state.repositoryByKey(name);
         }
         catch (IllegalArgumentException e) {
             throw new ValidationException(

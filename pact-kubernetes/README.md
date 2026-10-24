@@ -36,11 +36,13 @@ Use the configured Artifact Keeper backend ID as the key in
 explicit principal type required. The backend accepts the generic compiler's
 `name` / `permissions` representation as well as `registry`'s normalized
 `repository` / `actions` form.
-Use `registry: {type: artifact, id: <UUID>}` for an arbitrary Artifact Keeper
-target. Registry access also accepts `principals` instead of `users`, an explicit
+Use `{type: project, name: payments}` for a named target, or
+`{type: artifact, repository: releases, path: org/app.jar}` for a qualified
+artifact. `{type: <type>, id: <UUID>}` remains available for explicit IDs.
+Registry access also accepts `principals` instead of `users`, an explicit
 `principal-type` (`user`, `service_account`, `group`, or `anonymous`), and
-`conditions: {allowed_cidrs: [...]}` with the current API profile. Group
-principals must be UUIDs. See the [Artifact Keeper model and examples](../pact-artifact-keeper/README.md).
+`allowed_cidrs: [...]` directly in the access entry with the current API profile. Group
+principals accept exact group names or UUIDs. See the [Artifact Keeper model and examples](../pact-artifact-keeper/README.md).
 For a custom backend ID, use `users` for principal names/IDs; the `principals`
 alias is supplied by the specialized `registry` compiler.
 
@@ -179,3 +181,13 @@ The in-repository Helm chart is in [`charts/pact`](../charts/pact); it can
 install a generic `DataAccess` CRD and the controller's RBAC. Service-specific
 CRD schema validation and external backend deployments remain operator
 responsibilities.
+
+## Artifact Keeper end-to-end verification
+
+The opt-in `KubernetesArtifactKeeperLiveIntegrationTest` uses a real isolated
+Kubernetes API and Artifact Keeper 1.11.1. It covers named subjects/objects,
+mixed users and service accounts, arbitrary backend IDs, flat CIDRs, status
+persistence, updates and finalizer cleanup. A second scenario starts two
+separate controller JVMs and verifies restart restores applied state without
+rewriting permissions. Run it using the `kubernetes` Compose profile described
+in [INTEGRATION_TESTS.md](../INTEGRATION_TESTS.md).

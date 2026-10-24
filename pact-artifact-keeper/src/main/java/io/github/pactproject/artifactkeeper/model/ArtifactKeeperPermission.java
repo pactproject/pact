@@ -11,8 +11,15 @@ public record ArtifactKeeperPermission(
         String principalType,
         String principal,
         Set<String> actions,
-        Map<String, Value> conditions
+        Map<String, Value> conditions,
+        String targetRepository,
+        String targetVersion
 ) {
+    public ArtifactKeeperPermission(String targetType, String target, boolean targetById,
+                                    String principalType, String principal, Set<String> actions,
+                                    Map<String, Value> conditions) {
+        this(targetType, target, targetById, principalType, principal, actions, conditions, null, null);
+    }
     public ArtifactKeeperPermission(String repository, String principalType, String username, Set<String> actions) {
         this("repository", repository, false, principalType, username, actions, Map.of());
     }

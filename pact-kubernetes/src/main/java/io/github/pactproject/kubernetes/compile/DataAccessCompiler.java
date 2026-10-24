@@ -193,10 +193,13 @@ public final class DataAccessCompiler
                 Map<String, Object> registryFields = new HashMap<>();
                 registryFields.put("repository", registryTarget.get("name"));
                 targets = targetCombinations(registryFields);
-            } else if (registryTarget.keySet().equals(Set.of("type", "id"))) {
+            } else if (registryTarget.containsKey("type")) {
                 targets = parseTarget(registryTarget);
+                if (targets.stream().anyMatch(target -> !validRegistryTarget(target))) {
+                    throw invalid("Invalid typed Registry target: use id, name, or artifact repository and path");
+                }
             } else {
-                throw invalid("Registry service requires only name, or type and id fields");
+                throw invalid("Registry service requires name, or a typed target");
             }
         }
         else {
@@ -224,6 +227,17 @@ public final class DataAccessCompiler
         }
 
         return result;
+    }
+
+    private static boolean validRegistryTarget(Map<String, String> target) {
+        var keys = target.keySet();
+        String type = target.get("type");
+        if (keys.equals(Set.of("type", "id"))) return true;
+        if (Set.of("system", "global").contains(type) && keys.equals(Set.of("type"))) return true;
+        if (!type.equals("artifact")) return keys.equals(Set.of("type", "name"));
+        var expected = new HashSet<>(Set.of("type", "repository", keys.contains("path") ? "path" : "name"));
+        if (keys.contains("version")) expected.add("version");
+        return keys.equals(expected);
     }
 
     private String findBackendId(Map<?, ?> resource)
@@ -334,7 +348,7 @@ public final class DataAccessCompiler
             }
 
             if (!key.equals(USERS_FIELD)
-                    && !Set.of("principals", "principal-type", "permissions", "conditions").contains(key)) {
+                    && !Set.of("principals", "principal-type", "permissions", "allowed_cidrs").contains(key)) {
                 throw invalid(
                         "Registry access does not support field '"
                                 + key
@@ -394,11 +408,11 @@ public final class DataAccessCompiler
             }
             attributes.put("principal-type", Value.string(name));
         }
-        if (access.containsKey("conditions")) {
-            if (!(access.get("conditions") instanceof Map<?, ?>)) {
-                throw invalid("Registry conditions must be an object");
+        if (access.containsKey("allowed_cidrs")) {
+            if (!(access.get("allowed_cidrs") instanceof Iterable<?>)) {
+                throw invalid("Registry allowed_cidrs must be an array");
             }
-            attributes.put("conditions", valueParser.parse(access.get("conditions")));
+            attributes.put("allowed_cidrs", valueParser.parse(access.get("allowed_cidrs")));
         }
 
         Set<Access> result = new HashSet<>();

@@ -142,6 +142,31 @@ Both profiles also exercise permission CRUD for repository, artifact, project,
 group, system, global, and an unfamiliar target type. The current profile adds
 CIDR-condition round trips and group/anonymous principal tests. These generic
 CRUD tests do not assert artifact-level content enforcement.
+`ArtifactKeeperEnforcementLiveIntegrationTest` adds current-profile download
+checks: two independent TCP peers exercise permitted/denied CIDRs, alternating
+requests detect IP-insensitive authorization caching, and forged forwarding
+headers must not bypass the restriction. Named project grants allow content in
+two assigned repositories while denying an unrelated project's content;
+revocation denies subsequent downloads. A separate 1.11.1 characterization test
+confirms that an artifact-only grant does not pass the repository download gate.
+It must not be interpreted as successful per-artifact authorization.
+The rollback scenario forwards real HTTP calls and injects one 503 only after a
+successful permission deletion. It checks that `PactCore` recreates the original
+grant including CIDRs and can retry the desired transition afterward.
+
+The enforcement suite requires `current`. Its CIDR scenario additionally needs
+`PACT_IT_ARTIFACT_KEEPER_ALLOWED_PROBE_URL`,
+`PACT_IT_ARTIFACT_KEEPER_DENIED_PROBE_URL`, and
+`PACT_IT_ARTIFACT_KEEPER_ALLOWED_PROBE_HOST` (the allowed proxy's IP or a DNS name
+resolvable by the test runner). Compose and compatibility CI configure these
+automatically. Without the allowed-probe URL, that one scenario is skipped;
+the other current-profile enforcement checks still run. The probe proxies use
+real TCP addresses; do not configure them as trusted forwarding proxies in AK.
+Name-resolution scenarios create temporary groups and repositories/artifacts on
+both profiles, plus projects on `current`. They verify exact name-to-ID mapping,
+repository scope, and no grant rewrite when switching a named declaration to
+the equivalent IDs. Project-name lookup and revision selectors are rejected on
+`legacy` before permission writes.
 To choose the newer pair locally, set these values in `integration/.env` before
 starting a fresh Compose project:
 
@@ -193,3 +218,38 @@ test this transition because the filesystem provider does not persist applied
 state across process restarts.
 The PostgreSQL Maven live test runs as part of the `tests` profile and creates
 its own temporary database and identity on the Compose PostgreSQL service.
+
+## Kubernetes to Artifact Keeper E2E and process restart
+
+The `kubernetes` profile starts a disposable, privileged k3s container. It does
+not use or modify Docker Desktop's Kubernetes cluster or the user's kubeconfig.
+Run it with Artifact Keeper 1.11.1 / `current` selected as above:
+
+```powershell
+docker compose --env-file integration/.env -p pact-k8s-it -f integration/compose.yaml `
+  --profile kubernetes build artifact-keeper-bootstrap
+docker compose --env-file integration/.env -p pact-k8s-it -f integration/compose.yaml `
+  --profile kubernetes run --rm kubernetes-artifact-keeper-tests
+docker compose --env-file integration/.env -p pact-k8s-it -f integration/compose.yaml `
+  --profile kubernetes down -v
+```
+
+`KubernetesArtifactKeeperLiveIntegrationTest` sends public DataAccess YAML
+through a real Kubernetes API, watch controller, core, and Artifact Keeper.
+The fixture uses arbitrary backend ID `packages`, mixed human and `svc-*`
+subjects, named repositories/projects/groups, a qualified artifact path, and
+flat `allowed_cidrs`. It checks persisted status, exact target/principal UUIDs,
+wire restrictions, an API update, and finalizer-driven deletion of all grants.
+The second scenario stops the first controller JVM, starts a new JVM, verifies
+restoration of all five accesses from `status.lastAppliedSpec` without changing
+physical permission IDs, then deletes the resource and verifies real cleanup.
+This is provider persistence; filesystem applied state remains process-local.
+
+The tests create and remove only their dedicated
+`integration.pactproject.github.io` CRD and namespace when absent, and require
+that CRD to contain no existing resources cluster-wide. The generated k3s admin
+kubeconfig is shared only with the disposable runner; the runner removes its
+temporary copy on exit. `down -v` removes the cluster and credentials volume.
+The CI workflow runs these E2Es separately from both API-compatibility jobs.
+Set `PACT_INTEGRATION_TEST_IMAGE` to select a separately tagged local runner
+image; the default is `pact-integration-tests:local`.

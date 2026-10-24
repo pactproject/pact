@@ -9,6 +9,7 @@ import io.github.pactproject.artifactkeeper.ArtifactKeeperConfig;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
+import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiNamedObject;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperClient;
 import io.github.pactproject.api.value.*;
 
@@ -143,9 +144,54 @@ public final class ArtifactKeeperHttpClient
                 "/api/v1/repositories",
                 node -> new ArtifactKeeperApiRepository(
                         text(node, "id"),
-                        text(node, "key")
+                        text(node, "key"),
+                        node.path("name").asText(text(node, "key"))
                 )
         );
+    }
+
+    @Override
+    public List<ArtifactKeeperApiNamedObject> getGroups() throws ArtifactKeeperClientException {
+        return getAllPages("/api/v1/groups", node -> new ArtifactKeeperApiNamedObject(
+                text(node, "id"), text(node, "name")));
+    }
+
+    @Override
+    public List<ArtifactKeeperApiNamedObject> getProjects() throws ArtifactKeeperClientException {
+        JsonNode response = request("GET", "/api/v1/projects", null, null);
+        if (response == null || !response.path("items").isArray()) {
+            throw new ArtifactKeeperClientException("Artifact Keeper project list is missing an 'items' array");
+        }
+        List<ArtifactKeeperApiNamedObject> projects = new ArrayList<>();
+        for (JsonNode node : response.path("items")) {
+            projects.add(new ArtifactKeeperApiNamedObject(text(node, "id"), text(node, "key"), text(node, "name")));
+        }
+        return List.copyOf(projects);
+    }
+
+    @Override
+    public String getArtifactId(String repository, String path, String version) throws ArtifactKeeperClientException {
+        String encodedPath = java.util.Arrays.stream(path.split("/", -1))
+                .map(segment -> urlEncode(segment).replace("+", "%20"))
+                .collect(java.util.stream.Collectors.joining("/"));
+        JsonNode response = request("GET", "/api/v1/repositories/" + urlEncode(repository)
+                + "/artifacts/" + encodedPath,
+                version == null ? null : List.of("version=" + urlEncode(version)), null);
+        if (response == null) throw new ArtifactKeeperClientException("Artifact Keeper returned no artifact metadata");
+        if (version != null && !version.trim().equals("latest")) {
+            String selector = version.trim();
+            long revision = response.path("revision").asLong(-1);
+            boolean matches = selector.equals(response.path("version_label").asText(null));
+            try {
+                matches |= Long.parseLong(selector) == revision;
+            } catch (NumberFormatException ignored) {
+                // A non-numeric selector is a version label.
+            }
+            if (revision < 1 || !matches) {
+                throw new ArtifactKeeperClientException("Artifact Keeper did not resolve requested artifact revision: " + version);
+            }
+        }
+        return text(response, "id");
     }
 
     @Override

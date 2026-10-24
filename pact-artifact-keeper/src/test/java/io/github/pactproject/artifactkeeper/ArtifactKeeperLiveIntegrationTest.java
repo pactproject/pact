@@ -109,9 +109,103 @@ class ArtifactKeeperLiveIntegrationTest {
 
     private static PactState typedState(String principal, String principalType, String type, String id,
                                          Set<String> actions, Map<String, Value> conditions) {
-        return new PactState(Set.of(new Access(principal, new Resource("registry", Map.of("type", type, "id", id)),
-                Map.of("principal-type", Value.string(principalType), "conditions", Value.object(conditions),
-                        "actions", Value.set(actions.stream().map(Value::string).collect(Collectors.toSet()))))));
+        var attributes = new java.util.HashMap<String, Value>(Map.of("principal-type", Value.string(principalType),
+                "actions", Value.set(actions.stream().map(Value::string).collect(Collectors.toSet()))));
+        attributes.putAll(conditions);
+        return new PactState(Set.of(new Access(principal, new Resource("registry", Map.of("type", type, "id", id)), attributes)));
+    }
+
+    @Test
+    void resolvesGroupNamesAsBothSubjectsAndObjectsAgainstLiveApi()
+            throws Exception, ArtifactKeeperClientException {
+        var config = config(1);
+        var client = new ArtifactKeeperHttpClient(config);
+        assertTrue(client.getPermissions().isEmpty(), "Use a dedicated instance");
+        String name = "pact-it-named-group-" + UUID.randomUUID();
+        String id = apiJson(config, "POST", "/api/v1/groups", MAPPER.valueToTree(Map.of("name", name)))
+                .path("id").asText();
+        var backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
+        try {
+            var desired = namedState(name, "group", Map.of("type", "group", "name", name));
+            backend.apply(desired);
+            var grant = client.getPermissions().getFirst();
+            assertEquals(id, grant.principalId());
+            assertEquals(id, grant.targetId());
+            backend.apply(typedState(id, "group", "group", id, Set.of("read"), Map.of()));
+            assertEquals(List.of(grant), client.getPermissions());
+        } finally {
+            try { backend.apply(PactState.empty()); }
+            finally { apiJson(config, "DELETE", "/api/v1/groups/" + id, null); }
+        }
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "PACT_IT_ARTIFACT_KEEPER_API_PROFILE", matches = "current")
+    void resolvesProjectDisplayNameAndKeyAgainstLiveApi()
+            throws Exception, ArtifactKeeperClientException {
+        var config = config(100);
+        var client = new ArtifactKeeperHttpClient(config);
+        assertTrue(client.getPermissions().isEmpty(), "Use a dedicated instance");
+        String key = "pact-it-project-" + UUID.randomUUID();
+        String name = "PACT named project " + UUID.randomUUID();
+        String id = apiJson(config, "POST", "/api/v1/projects", MAPPER.valueToTree(Map.of("key", key, "name", name)))
+                .path("id").asText();
+        var backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
+        try {
+            backend.apply(namedState(required("PACT_IT_ARTIFACT_KEEPER_USER"), "user", Map.of("type", "project", "name", name)));
+            var grant = client.getPermissions().getFirst();
+            assertEquals(id, grant.targetId());
+            backend.apply(namedState(grant.principalId(), "user", Map.of("type", "project", "name", key)));
+            assertEquals(List.of(grant), client.getPermissions());
+        } finally {
+            try { backend.apply(PactState.empty()); }
+            finally { apiJson(config, "DELETE", "/api/v1/projects/" + id, null); }
+        }
+    }
+
+    @Test
+    void resolvesRepositoryDisplayNameAndArtifactPathAgainstLiveApi()
+            throws Exception, ArtifactKeeperClientException {
+        var config = config(100);
+        var client = new ArtifactKeeperHttpClient(config);
+        assertTrue(client.getPermissions().isEmpty(), "Use a dedicated instance");
+        String repository = "pact-it-named-artifact-" + UUID.randomUUID();
+        String displayName = "PACT named repository " + UUID.randomUUID();
+        var repositoryConfig = new java.util.HashMap<String, Object>(Map.of(
+                "key", repository, "name", displayName, "format", "generic", "repo_type", "local", "is_public", false));
+        if (config.apiProfile() == ArtifactKeeperApiProfile.CURRENT) repositoryConfig.put("versioning_enabled", true);
+        apiJson(config, "POST", "/api/v1/repositories", MAPPER.valueToTree(repositoryConfig));
+        var backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
+        String path = "org/app.jar";
+        try {
+            String artifactId = apiJson(config, "PUT", "/api/v1/repositories/" + repository + "/artifacts/" + path,
+                    MAPPER.valueToTree(Map.of("fixture", "artifact-by-path"))).path("id").asText();
+            var desired = namedState(required("PACT_IT_ARTIFACT_KEEPER_USER"), "user",
+                    Map.of("type", "artifact", "repository", displayName, "path", path));
+            backend.apply(desired);
+            var grant = client.getPermissions().getFirst();
+            assertEquals("artifact", grant.targetType());
+            assertEquals(artifactId, grant.targetId());
+            backend.apply(typedState(grant.principalId(), "user", "artifact", artifactId, Set.of("read"), Map.of()));
+            assertEquals(List.of(grant), client.getPermissions());
+            if (config.apiProfile() == ArtifactKeeperApiProfile.CURRENT) {
+                apiJson(config, "PUT", "/api/v1/repositories/" + repository + "/artifacts/" + path,
+                        MAPPER.valueToTree(Map.of("fixture", "second-revision")));
+                String revisionId = apiJson(config, "GET", "/api/v1/repositories/" + repository + "/artifacts/" + path + "?version=1", null)
+                        .path("id").asText();
+                backend.apply(namedState(grant.principalId(), "user", Map.of("type", "artifact", "repository", repository,
+                        "path", path, "version", "1")));
+                assertEquals(revisionId, client.getPermissions().getFirst().targetId());
+            }
+        } finally {
+            try { backend.apply(PactState.empty()); }
+            finally { apiJson(config, "DELETE", "/api/v1/repositories/" + repository, null); }
+        }
+    }
+
+    private static PactState namedState(String principal, String principalType, Map<String, String> target) {
+        return new PactState(Set.of(new Access(principal, new Resource("registry", target), Map.of(
+                "principal-type", Value.string(principalType), "actions", Value.set(Set.of(Value.string("read")))))));
     }
 
     @Test

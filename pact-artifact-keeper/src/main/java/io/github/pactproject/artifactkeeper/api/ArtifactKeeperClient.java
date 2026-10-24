@@ -15,6 +15,18 @@ public interface ArtifactKeeperClient {
 
     List<ArtifactKeeperApiPermission> getPermissions() throws ArtifactKeeperClientException;
 
+    default List<ArtifactKeeperApiNamedObject> getGroups() throws ArtifactKeeperClientException {
+        throw new ArtifactKeeperClientException("Client does not support group name resolution");
+    }
+
+    default List<ArtifactKeeperApiNamedObject> getProjects() throws ArtifactKeeperClientException {
+        throw new ArtifactKeeperClientException("Client does not support project name resolution");
+    }
+
+    default String getArtifactId(String repository, String path, String version) throws ArtifactKeeperClientException {
+        throw new ArtifactKeeperClientException("Client does not support artifact path resolution");
+    }
+
     ArtifactKeeperApiPermission createPermission(
             String principalType,
             String principalId,

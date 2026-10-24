@@ -622,11 +622,12 @@ class ArtifactKeeperBackendTest {
 
     private static PactState typedState(String principal, String principalType, String type, String id,
                                         Set<String> actions, Map<String, Value> conditions) {
-        return state(new Access(principal, new Resource("ak", Map.of("type", type, "id", id)), Map.of(
+        var attributes = new java.util.HashMap<String, Value>(Map.of(
                 "principal-type", Value.string(principalType),
-                "conditions", Value.object(conditions),
                 "actions", Value.set(actions.stream().map(Value::string).collect(java.util.stream.Collectors.toSet()))
-        )));
+        ));
+        attributes.putAll(conditions);
+        return state(new Access(principal, new Resource("ak", Map.of("type", type, "id", id)), attributes));
     }
 
     private static FakeArtifactKeeperClient client(

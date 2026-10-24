@@ -3,6 +3,7 @@ package io.github.pactproject.artifactkeeper;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
+import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiNamedObject;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperClient;
 import io.github.pactproject.artifactkeeper.client.ArtifactKeeperClientException;
 
@@ -18,6 +19,12 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
     private final List<ArtifactKeeperApiUser> users;
     private final List<ArtifactKeeperApiRepository> repositories;
     private final List<ArtifactKeeperApiPermission> permissions;
+    private List<ArtifactKeeperApiNamedObject> groups = List.of();
+    private List<ArtifactKeeperApiNamedObject> projects = List.of();
+    private final Map<ArtifactKey, String> artifacts = new java.util.HashMap<>();
+    private int artifactReads;
+    private int groupReads;
+    private boolean failCatalogReads;
 
     private int createPermissionCalls;
     private int deletePermissionCalls;
@@ -52,6 +59,37 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
     public List<ArtifactKeeperApiPermission> getPermissions() {
         return List.copyOf(permissions);
     }
+
+    @Override
+    public List<ArtifactKeeperApiNamedObject> getGroups() throws ArtifactKeeperClientException {
+        groupReads++;
+        if (failCatalogReads) throw new ArtifactKeeperClientException("Catalog unavailable");
+        return groups;
+    }
+
+    @Override
+    public List<ArtifactKeeperApiNamedObject> getProjects() throws ArtifactKeeperClientException {
+        if (failCatalogReads) throw new ArtifactKeeperClientException("Catalog unavailable");
+        return projects;
+    }
+
+    @Override
+    public String getArtifactId(String repository, String path, String version) throws ArtifactKeeperClientException {
+        artifactReads++;
+        String id = artifacts.get(new ArtifactKey(repository, path, version));
+        if (id == null || failCatalogReads) throw new ArtifactKeeperClientException("Artifact not found or unavailable");
+        return id;
+    }
+
+    void groups(List<ArtifactKeeperApiNamedObject> values) { groups = List.copyOf(values); }
+    void projects(List<ArtifactKeeperApiNamedObject> values) { projects = List.copyOf(values); }
+    void artifact(String repository, String path, String version, String id) {
+        artifacts.put(new ArtifactKey(repository, path, version), id);
+    }
+    int artifactReads() { return artifactReads; }
+    int groupReads() { return groupReads; }
+    void failCatalogReads() { failCatalogReads = true; }
+    private record ArtifactKey(String repository, String path, String version) { }
 
     @Override
     public ArtifactKeeperApiPermission createPermission(

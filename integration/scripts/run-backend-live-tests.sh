@@ -12,6 +12,6 @@ export PACT_IT_ARTIFACT_KEEPER_TOKEN
 
 exec mvn -B \
     -pl "${PACT_IT_BACKEND_MODULES:-pact-ranger,pact-artifact-keeper,pact-postgresql,pact-elasticsearch}" -am \
-    "-Dtest=${PACT_IT_BACKEND_TESTS:-RangerLiveIntegrationTest,ArtifactKeeperLiveIntegrationTest,PostgreSqlLiveIntegrationTest,ElasticsearchLiveIntegrationTest}" \
+    "-Dtest=${PACT_IT_BACKEND_TESTS:-RangerLiveIntegrationTest,ArtifactKeeperLiveIntegrationTest,ArtifactKeeperEnforcementLiveIntegrationTest,PostgreSqlLiveIntegrationTest,ElasticsearchLiveIntegrationTest}" \
     -Dsurefire.failIfNoSpecifiedTests=false \
     -Dpact.integration=true test

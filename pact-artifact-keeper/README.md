@@ -57,15 +57,16 @@ instead of guessing an existing account's type.
 All four principal types are supported: `user`, `service_account`, `group`,
 and `anonymous`. Set `principal-type` in access attributes when needed;
 user/service-account classification for existing accounts still comes from
-server metadata. Group principals use group UUIDs, not names; PACT does not
+server metadata. Group principals accept group names or UUIDs; PACT does not
 create groups or manage memberships. Anonymous principals use the nil UUID
 and may only grant `read` on repository or project targets.
 
-With `api-profile: current`, optional `conditions: {allowed_cidrs: [...]}`
-restricts a grant by client IP. PACT preserves these conditions when reading,
-diffing, creating, and compensating grants. Empty CIDR lists, malformed CIDRs,
-unknown condition keys, and conflicting conditions for the same principal and
-target are rejected. Anonymous and conditional desired grants require `current`.
+With `api-profile: current`, optional `allowed_cidrs: [...]` directly in the
+access entry restricts a grant by client IP. PACT preserves this restriction when
+reading, diffing, creating, and compensating grants. Empty CIDR lists, malformed
+CIDRs, unknown access attributes, and conflicting CIDR restrictions for the same
+principal and target are rejected. Nested `conditions` is not accepted in Artifact
+Keeper declarations. Anonymous and IP-restricted desired grants require `current`.
 
 Example Kubernetes `DataAccess.spec`:
 
@@ -73,17 +74,68 @@ Example Kubernetes `DataAccess.spec`:
 resources:
   - registry:
       type: project
-      id: 11111111-1111-1111-1111-111111111111
+      name: payments
     access:
-      - principals: [22222222-2222-2222-2222-222222222222]
+      - users: [release-readers]
         principal-type: group
         permissions: [read]
-        conditions:
-          allowed_cidrs: [10.0.0.0/8]
+        allowed_cidrs: [10.0.0.0/8]
 ```
 
+### Names and explicit IDs
+
+Names are exact, case-sensitive references. PACT resolves every desired reference
+before changing permissions and rejects missing or ambiguous matches. A name
+and an ID resolving to the same object produce the same grant; switching forms
+does not recreate it. Catalogs are loaded only when needed and only cached within
+one reconciliation, so renames and new objects are visible on the next apply.
+
+| Object or subject | Named form | Explicit ID form |
+| --- | --- | --- |
+| Repository target | `{name: releases}` or `{type: repository, name: releases}`; repository key or unique display name | `{type: repository, id: <UUID>}` |
+| Project target | `{type: project, name: payments}`; project key or unique display name | `{type: project, id: <UUID>}` |
+| Group target | `{type: group, name: developers}` | `{type: group, id: <UUID>}` |
+| Artifact target | `{type: artifact, repository: releases, path: org/app.jar}` | `{type: artifact, id: <UUID>}` |
+| User/service-account subject | `users: [alice, svc-build]` | UUIDs in `users`; existing account metadata determines type |
+| Group subject | `users: [developers]` with `principal-type: group` | UUIDs with the same principal type |
+
+Artifact `name` is also accepted in place of `path`, but it denotes the complete
+relative artifact path, not a basename search. Repository scope is required.
+An optional `version` selects a revision number or label on version-enabled
+repositories; without it the server resolves HEAD. Different repositories and
+versions are resolved separately. No artifact-name lookup uses fuzzy search.
+If a revision selector is supplied, the returned revision/label must match it;
+PACT rejects a response that silently fell back to HEAD.
+
+```yaml
+resources:
+  - company-registry:
+      type: artifact
+      repository: releases
+      path: org/example/app/1.0/app.jar
+    access:
+      - users: [release-readers]
+        principal-type: group
+        permissions: [read]
+```
+
+`{type: system}` and `{type: global}` use the nil UUID without a catalog lookup;
+their optional `name` must equal the type. Unfamiliar target types still require
+an explicit UUID. Anonymous subjects remain the nil principal with read-only
+repository/project grants. Resolving a name never creates groups, projects,
+repositories, or artifacts, and never adds group memberships.
+
+Project-name lookup and artifact `version` selectors require `api-profile:
+current`; Artifact Keeper 1.5.1 has no project catalog or revision-selector
+contract. Group names and repository-qualified artifact paths work with both
+supported profiles. Explicit IDs continue to avoid optional catalog reads.
+
+Names are configuration references, not durable snapshots of an object ID.
+Reusing a name for another object changes what the next reconciliation targets;
+use an explicit ID when the declaration must remain bound to one object.
+
 Filesystem access uses `principal`, `resource.backendId`, `resource.target`,
-and `attributes` (`actions`, `principal-type`, and optional `conditions`), as
+and `attributes` (`actions`, `principal-type`, and optional `allowed_cidrs`), as
 shown in the [filesystem fixture](../integration/e2e/desired-state.yaml).
 
 Existing permissions of all target types participate in the normal authoritative
@@ -153,9 +205,12 @@ The permission create/list JSON contract in PACT matches the tagged Artifact
 Keeper 1.5.1 server API: create uses `principal_type`, `principal_id`,
 `target_type`, `target_id`, and `actions`; list returns those fields under
 `items` and `pagination.total_pages`. The upstream request requires principal
-and target IDs to be UUIDs. PACT resolves names for repository/user references
-and forwards generic target UUIDs directly. Current-profile requests also carry
-`conditions` when present. Local HTTP contract tests protect these shapes.
+and target IDs to be UUIDs. PACT resolves named repositories, projects, groups,
+artifacts, and user/service-account references before writes, and forwards
+explicit generic target UUIDs directly. Current-profile requests also carry
+`conditions: {allowed_cidrs: [...]}` when configured; this is the server's JSON
+contract, while PACT declarations use the flat `allowed_cidrs` attribute. Local
+HTTP contract tests protect these shapes.
 
 The CI compatibility matrix and opt-in live tests cover both releases above,
 including service-account creation, repeated reconciliation, grant revocation,
@@ -187,6 +242,17 @@ listed target type plus an unfamiliar target string. The current profile also
 checks conditions and group/anonymous principals. Content authorization
 with a service-account token is verified separately on a private repository.
 These CRUD checks do not claim individual-artifact enforcement.
+
+Additional current-profile live tests verify actual artifact downloads from
+allowed/denied TCP source IPs, resistance to untrusted forwarding headers,
+project inheritance across two repositories and denial outside that project,
+and immediate revocation. In 1.11.1, an artifact-only grant does **not** allow
+downloads from a private repository: the content route still requires a
+repository/project grant. A characterization test preserves this distinction.
+Another test injects a real HTTP failure after a successful permission deletion
+and verifies core compensation restores actions, principal, target and CIDRs.
+The Kubernetes E2E additionally checks named YAML and persisted state across
+two controller JVMs. See the integration instructions for the disposable stack.
 
 ## Primary references
 

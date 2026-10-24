@@ -631,15 +631,14 @@ class DataAccessCompilerTest
                 "access", List.of(Map.of(
                         "principals", List.of(group), "principal-type", "group",
                         "permissions", List.of("read"),
-                        "conditions", Map.of("allowed_cidrs", List.of("10.0.0.0/8"))
+                        "allowed_cidrs", List.of("10.0.0.0/8")
                 ))
         )))));
         Access access = state.accesses().iterator().next();
         assertEquals(group, access.principal());
         assertEquals(Map.of("type", "project", "id", id), access.resource().target());
         assertEquals(new StringValue("group"), access.attributes().get("principal-type"));
-        assertEquals(new ObjectValue(Map.of("allowed_cidrs", new SetValue(Set.of(
-                new StringValue("10.0.0.0/8"))))), access.attributes().get("conditions"));
+        assertEquals(new SetValue(Set.of(new StringValue("10.0.0.0/8"))), access.attributes().get("allowed_cidrs"));
     }
 
     @Test
@@ -656,6 +655,29 @@ class DataAccessCompilerTest
                         && access.resource().target().equals(Map.of("name", "repository-a"))
                         && access.attributes().equals(Map.of("permissions",
                         new SetValue(Set.of(new StringValue("read")))))));
+    }
+
+    @Test
+    void compilesNamedProjectAndQualifiedArtifactTargets() {
+        var spec = Map.of("resources", List.of(
+                Map.of("registry", Map.of("type", "project", "name", "payments"),
+                        "access", List.of(Map.of("users", List.of("alice"), "permissions", List.of("read")))),
+                Map.of("registry", Map.of("type", "artifact", "repository", "releases",
+                                "path", "org/app.jar", "version", "stable"),
+                        "access", List.of(Map.of("principals", List.of("readers"), "principal-type", "group",
+                                "permissions", List.of("read"))))));
+        var accesses = compiler.compile(List.of(spec)).accesses();
+        assertEquals(2, accesses.size());
+        assertTrue(accesses.stream().anyMatch(a -> a.resource().target().equals(Map.of("type", "project", "name", "payments"))));
+        assertTrue(accesses.stream().anyMatch(a -> a.principal().equals("readers") && a.resource().target().equals(Map.of(
+                "type", "artifact", "repository", "releases", "path", "org/app.jar", "version", "stable"))));
+    }
+
+    @Test
+    void rejectsNestedRegistryConditions() {
+        assertThrows(IllegalArgumentException.class, () -> compiler.compile(List.of(Map.of("resources", List.of(Map.of(
+                "registry", Map.of("name", "repo-a"), "access", List.of(Map.of("users", List.of("alice"),
+                        "permissions", List.of("read"), "conditions", Map.of("allowed_cidrs", List.of("10.0.0.0/8"))))))))));
     }
 
     @Test

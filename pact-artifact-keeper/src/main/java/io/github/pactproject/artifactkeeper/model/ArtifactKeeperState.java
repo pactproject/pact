@@ -34,12 +34,15 @@ public final class ArtifactKeeperState {
     }
 
     public ArtifactKeeperApiUser userByUsername(String username) {
-        return users.values().stream()
+        return unique(users.values().stream()
                 .filter(user -> user.username().equals(username))
-                .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException(
-                        "Artifact Keeper user not found: " + username
-                ));
+                .toList(), "user", username);
+    }
+
+    public java.util.Optional<ArtifactKeeperApiUser> findUserByReference(String reference) {
+        var matches = users.values().stream().filter(user -> user.username().equals(reference)
+                || user.id().equalsIgnoreCase(reference)).toList();
+        return matches.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(unique(matches, "user", reference));
     }
 
     public ArtifactKeeperApiRepository repositoryById(String id) {
@@ -50,12 +53,14 @@ public final class ArtifactKeeperState {
     }
 
     public ArtifactKeeperApiRepository repositoryByName(String name) {
-        return repositories.values().stream()
-                .filter(repository -> repository.name().equals(name))
-                .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException(
-                        "Artifact Keeper repository not found: " + name
-                ));
+        return unique(repositories.values().stream()
+                .filter(repository -> repository.name().equals(name) || repository.displayName().equals(name))
+                .toList(), "repository", name);
+    }
+
+    public ArtifactKeeperApiRepository repositoryByKey(String key) {
+        return unique(repositories.values().stream().filter(repository -> repository.name().equals(key)).toList(),
+                "repository", key);
     }
 
     public List<ArtifactKeeperApiPermission> permissions() {
@@ -144,5 +149,11 @@ public final class ArtifactKeeperState {
         }
 
         return value;
+    }
+
+    private static <T> T unique(List<T> matches, String kind, String name) {
+        if (matches.isEmpty()) throw new IllegalArgumentException("Artifact Keeper " + kind + " not found: " + name);
+        if (matches.size() != 1) throw new IllegalArgumentException("Ambiguous Artifact Keeper " + kind + " name: " + name + "; use an ID");
+        return matches.getFirst();
     }
 }

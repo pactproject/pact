@@ -235,6 +235,18 @@ class ArtifactKeeperCompilerTest {
     }
 
     @Test
+    void rejectsNestedConditionsAndMisspelledCidrAttribute() {
+        var cidrs = Value.set(Set.of(Value.string("10.0.0.0/8")));
+        for (var invalid : List.of(Map.of("conditions", Value.object(Map.of("allowed_cidrs", cidrs))),
+                Map.of("allowed_cirds", cidrs))) {
+            var attributes = new java.util.HashMap<String, Value>(invalid);
+            attributes.put("actions", Value.set(Set.of(Value.string("read"))));
+            assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(new PactState(Set.of(
+                    new Access("alice", REPOSITORY, attributes)))));
+        }
+    }
+
+    @Test
     void restrictsAnonymousGrantsToReadOnRepositoriesAndProjects() {
         for (var target : List.of(Map.of("repository", "repo"), Map.of("type", "artifact", "id",
                 "11111111-1111-1111-1111-111111111111"))) {
@@ -246,9 +258,28 @@ class ArtifactKeeperCompilerTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"/absolute.jar", "../app.jar", "dir/../app.jar", "dir//app.jar", "dir\\app.jar", "dir/./app.jar"})
+    void rejectsUnsafeOrAmbiguousArtifactPaths(String path) {
+        var access = new Access("alice", new Resource("registry", Map.of("type", "artifact",
+                "repository", "repo-a", "path", path)), access("alice", Set.of("read")).attributes());
+        assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(new PactState(Set.of(access))));
+    }
+
+    @Test
+    void rejectsConflictingTargetSelectorsAndUnresolvableTypeNames() {
+        for (var target : List.of(Map.of("type", "project", "name", "payments", "id", "11111111-1111-1111-1111-111111111111"),
+                Map.of("type", "future_scope", "name", "object"),
+                Map.of("type", "artifact", "name", "app.jar"))) {
+            assertThrows(IllegalArgumentException.class, () -> ArtifactKeeperCompiler.compile(new PactState(Set.of(
+                    new Access("alice", new Resource("registry", target), access("alice", Set.of("read")).attributes())))));
+        }
+    }
+
     private static Access withConditions(Map<String, Value> conditions) {
-        return new Access("alice", REPOSITORY, Map.of(
-                "actions", Value.set(Set.of(Value.string("read"))), "conditions", Value.object(conditions)));
+        var attributes = new java.util.HashMap<String, Value>(conditions);
+        attributes.put("actions", Value.set(Set.of(Value.string("read"))));
+        return new Access("alice", REPOSITORY, attributes);
     }
 
     private static ArtifactKeeperPermission permission(

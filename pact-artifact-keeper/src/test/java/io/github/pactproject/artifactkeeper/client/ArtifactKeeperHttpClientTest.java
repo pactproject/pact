@@ -28,6 +28,53 @@ class ArtifactKeeperHttpClientTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void readsPagedGroupsUnpagedProjectsAndQualifiedArtifactMetadata() throws Exception, ArtifactKeeperClientException {
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        var artifactUri = new AtomicReference<java.net.URI>();
+        server.createContext("/api/v1/groups", exchange -> {
+            boolean first = exchange.getRequestURI().getQuery().contains("page=1&");
+            byte[] bytes = ("{\"items\":[{\"id\":\"" + (first ? "g1" : "g2")
+                    + "\",\"name\":\"" + (first ? "readers" : "writers")
+                    + "\"}],\"pagination\":{\"total_pages\":2}}").getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.createContext("/api/v1/projects", exchange -> {
+            byte[] bytes = "{\"items\":[{\"id\":\"p1\",\"key\":\"payments\",\"name\":\"Payments team\"}]}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.createContext("/api/v1/repositories/repo/artifacts/", exchange -> {
+            artifactUri.set(exchange.getRequestURI());
+            byte[] bytes = (exchange.getRequestURI().getPath().endsWith("unversioned.jar")
+                    ? "{\"id\":\"artifact-id\"}"
+                    : "{\"id\":\"artifact-id\",\"revision\":7,\"version_label\":\"release / 2\"}").getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new ArtifactKeeperHttpClient(new ArtifactKeeperConfig(
+                    java.net.URI.create("http://127.0.0.1:" + server.getAddress().getPort()), "test-token", 1,
+                    ArtifactKeeperApiProfile.CURRENT));
+            assertEquals(List.of("readers", "writers"), client.getGroups().stream().map(g -> g.name()).toList());
+            var project = client.getProjects().getFirst();
+            assertEquals("payments", project.key());
+            assertEquals("Payments team", project.name());
+            assertEquals("artifact-id", client.getArtifactId("repo", "dir/a b+#.jar", "release / 2"));
+            assertEquals("/api/v1/repositories/repo/artifacts/dir/a%20b%2B%23.jar", artifactUri.get().getRawPath());
+            assertEquals("version=release / 2", java.net.URLDecoder.decode(artifactUri.get().getRawQuery(), StandardCharsets.UTF_8));
+            assertThrows(ArtifactKeeperClientException.class, () -> client.getArtifactId("repo", "unversioned.jar", "7"),
+                    "A server that ignored the revision selector must not silently grant HEAD");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void roundTripsTypedPermissionWithConditions() throws Exception, ArtifactKeeperClientException {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         AtomicReference<JsonNode> posted = new AtomicReference<>();

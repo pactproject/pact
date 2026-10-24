@@ -4,7 +4,6 @@ import io.github.pactproject.api.Access;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.Resource;
 import io.github.pactproject.api.value.SetValue;
-import io.github.pactproject.api.value.ObjectValue;
 import io.github.pactproject.api.value.StringValue;
 import io.github.pactproject.api.value.Value;
 import io.github.pactproject.artifactkeeper.model.ArtifactKeeperPermission;
@@ -30,16 +29,20 @@ public final class ArtifactKeeperCompiler {
 
         for (Access access : state.accesses()) {
             Resource resource = access.resource();
-
-            boolean byId = resource.target().keySet().equals(Set.of("type", "id"));
-            boolean byName = resource.target().keySet().equals(Set.of("name"));
-            if (!byId && !byName && !resource.target().keySet().equals(Set.of("repository"))) {
-                throw new IllegalArgumentException("Artifact Keeper target must contain repository/name, or type and id");
+            if (access.attributes().containsKey("conditions")) {
+                throw new IllegalArgumentException("Artifact Keeper allowed_cidrs must be declared directly in access, without conditions");
             }
-            String targetType = byId ? requireTarget(resource, "type") : "repository";
-            String target = byId ? uuid(requireTarget(resource, "id"))
-                    : requireTarget(resource, byName ? "name" : "repository");
+            for (String attribute : access.attributes().keySet()) {
+                if (!Set.of("actions", "permissions", "principal-type", "allowed_cidrs").contains(attribute)) {
+                    throw new IllegalArgumentException("Unsupported Artifact Keeper access attribute: " + attribute);
+                }
+            }
+
+            Target target = compileTarget(resource);
             Set<String> actions = extractActions(access.attributes());
+            Value cidrs = access.attributes().get("allowed_cidrs");
+            Map<String, Value> conditions = cidrs == null ? Map.of() : Map.of("allowed_cidrs", cidrs);
+            validateCidrs(cidrs);
 
             if (actions.isEmpty()) {
                 continue;
@@ -51,26 +54,16 @@ public final class ArtifactKeeperCompiler {
             if (!Set.of("user", "service_account", "group", "anonymous").contains(principalType)) {
                 throw new IllegalArgumentException("Unsupported Artifact Keeper principal type: " + principalType);
             }
-            if (principalType.equals("group")) {
-                principal = uuid(principal);
-            }
+            if (principal.isBlank()) throw new IllegalArgumentException("Artifact Keeper principal must not be blank");
             if (principalType.equals("anonymous")) {
                 principal = NIL_ID;
-                if (!Set.of("repository", "project").contains(targetType) || !actions.equals(Set.of("read"))) {
+                if (!Set.of("repository", "project").contains(target.type()) || !actions.equals(Set.of("read"))) {
                     throw new IllegalArgumentException("Anonymous permissions may only grant read on repository or project targets");
                 }
             }
-            Value conditionValue = access.attributes().get("conditions");
-            Map<String, Value> conditions = Map.of();
-            if (conditionValue != null) {
-                if (!(conditionValue instanceof ObjectValue object)) {
-                    throw new IllegalArgumentException("Artifact Keeper conditions must be an object");
-                }
-                conditions = Map.copyOf(object.values());
-                validateConditions(conditions);
-            }
             permissions.add(new ArtifactKeeperPermission(
-                    targetType, target, byId, principalType, principal, actions, conditions));
+                    target.type(), target.reference(), target.byId(), principalType, principal, actions, conditions,
+                    target.repository(), target.version()));
         }
         return merge(permissions);
     }
@@ -79,7 +72,7 @@ public final class ArtifactKeeperCompiler {
         Map<Key, ArtifactKeeperPermission> merged = new HashMap<>();
         for (var permission : permissions) {
             Key key = new Key(permission.targetType(), permission.target(), permission.targetById(),
-                    permission.principalType(), permission.principal());
+                    permission.principalType(), permission.principal(), permission.targetRepository(), permission.targetVersion());
             var previous = merged.get(key);
             if (previous == null) {
                 merged.put(key, permission);
@@ -91,10 +84,48 @@ public final class ArtifactKeeperCompiler {
                 actions.addAll(permission.actions());
                 merged.put(key, new ArtifactKeeperPermission(permission.targetType(), permission.target(),
                         permission.targetById(), permission.principalType(), permission.principal(),
-                        actions, permission.conditions()));
+                        actions, permission.conditions(), permission.targetRepository(), permission.targetVersion()));
             }
         }
         return List.copyOf(merged.values());
+    }
+
+    private static Target compileTarget(Resource resource) {
+        var keys = resource.target().keySet();
+        if (keys.equals(Set.of("name")) || keys.equals(Set.of("repository"))) {
+            return new Target("repository", requireTarget(resource, keys.contains("name") ? "name" : "repository"),
+                    false, null, null);
+        }
+        String type = requireTarget(resource, "type");
+        if (keys.equals(Set.of("type", "id"))) {
+            return new Target(type, uuid(requireTarget(resource, "id")), true, null, null);
+        }
+        if (Set.of("system", "global").contains(type)
+                && (keys.equals(Set.of("type")) || keys.equals(Set.of("type", "name")))) {
+            if (keys.contains("name") && !requireTarget(resource, "name").equals(type)) {
+                throw new IllegalArgumentException("Artifact Keeper " + type + " target name must be '" + type + "'");
+            }
+            return new Target(type, NIL_ID, true, null, null);
+        }
+        if (type.equals("artifact")) {
+            String pathField = keys.contains("path") ? "path" : "name";
+            var expected = new HashSet<>(Set.of("type", "repository", pathField));
+            if (keys.contains("version")) expected.add("version");
+            if (!keys.equals(expected)) {
+                throw new IllegalArgumentException("Named artifact target requires type, repository, path (or name), and optional version");
+            }
+            String path = requireTarget(resource, pathField);
+            if (path.contains("\\") || path.chars().anyMatch(c -> Character.isISOControl(c))
+                    || java.util.Arrays.stream(path.split("/", -1)).anyMatch(p -> p.isEmpty() || p.equals(".") || p.equals(".."))) {
+                throw new IllegalArgumentException("Artifact Keeper artifact path must be a relative path without empty, '.' or '..' segments");
+            }
+            return new Target(type, path, false, requireTarget(resource, "repository"),
+                    keys.contains("version") ? requireTarget(resource, "version") : null);
+        }
+        if (keys.equals(Set.of("type", "name")) && Set.of("repository", "project", "group").contains(type)) {
+            return new Target(type, requireTarget(resource, "name"), false, null, null);
+        }
+        throw new IllegalArgumentException("Artifact Keeper target requires repository/name, type and id, or a supported named target");
     }
 
     public static String uuid(String value) {
@@ -109,18 +140,14 @@ public final class ArtifactKeeperCompiler {
         }
     }
 
-    private static void validateConditions(Map<String, Value> conditions) {
-        if (!Set.of("allowed_cidrs").containsAll(conditions.keySet())) {
-            throw new IllegalArgumentException("Unsupported Artifact Keeper condition: " + conditions.keySet());
-        }
-        Value value = conditions.get("allowed_cidrs");
+    private static void validateCidrs(Value value) {
         if (value == null) return;
         if (!(value instanceof SetValue cidrs) || cidrs.values().isEmpty()) {
-            throw new IllegalArgumentException("conditions.allowed_cidrs must be a non-empty set of CIDR strings");
+            throw new IllegalArgumentException("allowed_cidrs must be a non-empty set of CIDR strings");
         }
         for (Value item : cidrs.values()) {
             if (!(item instanceof StringValue cidr)) {
-                throw new IllegalArgumentException("conditions.allowed_cidrs must contain only CIDR strings");
+                throw new IllegalArgumentException("allowed_cidrs must contain only CIDR strings");
             }
             validateCidr(cidr.value());
         }
@@ -150,7 +177,7 @@ public final class ArtifactKeeperCompiler {
             int prefix = parts.length == 2 ? Integer.parseInt(parts[1]) : bits;
             if (prefix < 0 || prefix > bits) throw new IllegalArgumentException();
         } catch (IllegalArgumentException | java.net.UnknownHostException e) {
-            throw new IllegalArgumentException("Invalid conditions.allowed_cidrs entry: " + cidr, e);
+            throw new IllegalArgumentException("Invalid allowed_cidrs entry: " + cidr, e);
         }
     }
 
@@ -215,7 +242,9 @@ public final class ArtifactKeeperCompiler {
 
     private record Key(
             String targetType, String target, boolean targetById,
-            String principalType, String principal
+            String principalType, String principal, String repository, String version
     ) {
     }
+
+    private record Target(String type, String reference, boolean byId, String repository, String version) { }
 }

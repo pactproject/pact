@@ -37,15 +37,16 @@ PACT's current backend modules do not yet follow one uniform internal layout:
 | Ranger | `compile`, `sync`, `api`, `client`, config and backend | By default reconciles every policy in the configured service; `managed-only` opts into limiting writes/deletes to policies labeled `managed`. Ensures missing policy users, creating them with random passwords that are not retained. |
 | PostgreSQL | `compile`, `model`, `sync`, `api`, `client`, config and backend | Snapshots PACT-granted ACLs; reconciles identities separately; grant rollback does not reverse password changes. |
 | Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend owns most orchestration and mutable working state; uses default `prepare` compensation. Missing `svc-` usernames trigger service-account creation. Account metadata determines logical principal types; `legacy`/`current` API profiles translate service-account permission writes. |
-| Elasticsearch | README and Maven scaffold | Not implemented yet; use the recommendations in this guide rather than copying a partial implementation. |
+| Elasticsearch | `compile`, `model`, `api`, `client`, config and backend | Snapshots PACT-owned roles and reconciles native-user index privileges; preserves unrelated roles. |
 
 Artifact Keeper's current implementation already reflects the authoritative
 scope policy: it loads the permissions returned by `getPermissions()`, diffs
 the whole set against PACT's desired permissions, and deletes entries that are
 absent. Its effective scope is therefore the permission collection returned
-for the configured Artifact Keeper instance. The resolver currently rejects
-actual permission entries outside user-on-repository, so such entries can make
-reconciliation fail before changes are applied.
+for the configured Artifact Keeper instance. Actual-state resolution preserves
+all target types and the supported principal types. A separate read-only
+reference resolver translates desired names into canonical references before
+the permission diff; missing or ambiguous names fail before permission writes.
 
 There is a common external plugin contract, but not yet a common internal
 implementation template. New backends should use the layered pattern below.
@@ -300,6 +301,6 @@ and add a prepared transaction with tested compensation. Preserve-unmanaged
 mode, if offered, needs a supported way to filter that state; do not confuse a
 generic API `target_type` string with enforcement support.
 
-Build Elasticsearch against the documented contract from its first
-implementation. Do not copy the Artifact Keeper backend's legacy orchestration
-or assume that its behavior is the PACT-wide standard.
+Elasticsearch implements its own role snapshot and compensation contract.
+Do not assume that Artifact Keeper's legacy orchestration is the PACT-wide
+standard; retain each backend's documented scope and transaction semantics.
