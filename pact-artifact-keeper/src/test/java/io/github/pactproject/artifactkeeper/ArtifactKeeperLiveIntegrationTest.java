@@ -12,7 +12,6 @@ import io.github.pactproject.artifactkeeper.client.ArtifactKeeperClientException
 import io.github.pactproject.artifactkeeper.client.ArtifactKeeperHttpClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -44,10 +43,8 @@ class ArtifactKeeperLiveIntegrationTest {
         String targetId = type.equals("repository")
                 ? repositoryId(client, required("PACT_IT_ARTIFACT_KEEPER_REPOSITORY"))
                 : type.equals("system") ? "00000000-0000-0000-0000-000000000000" : UUID.randomUUID().toString();
-        Map<String, Value> conditions = config.apiProfile() == ArtifactKeeperApiProfile.CURRENT
-                ? Map.of("allowed_cidrs", Value.set(Set.of(
-                        Value.string("10.0.0.0/8"), Value.string("2001:db8::/32"))))
-                : Map.of();
+        Map<String, Value> conditions = Map.of("allowed_cidrs", Value.set(Set.of(
+                        Value.string("10.0.0.0/8"), Value.string("2001:db8::/32"))));
         var backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
         var desired = typedState(required("PACT_IT_ARTIFACT_KEEPER_USER"), "user", type, targetId,
                 Set.of("read"), conditions);
@@ -74,7 +71,6 @@ class ArtifactKeeperLiveIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"group", "anonymous"})
-    @EnabledIfEnvironmentVariable(named = "PACT_IT_ARTIFACT_KEEPER_API_PROFILE", matches = "current")
     void reconcilesNonUserPrincipalsThroughLiveApi(String principalType)
             throws Exception, ArtifactKeeperClientException {
         var config = config(100);
@@ -140,7 +136,6 @@ class ArtifactKeeperLiveIntegrationTest {
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = "PACT_IT_ARTIFACT_KEEPER_API_PROFILE", matches = "current")
     void resolvesProjectDisplayNameAndKeyAgainstLiveApi()
             throws Exception, ArtifactKeeperClientException {
         var config = config(100);
@@ -173,7 +168,7 @@ class ArtifactKeeperLiveIntegrationTest {
         String displayName = "PACT named repository " + UUID.randomUUID();
         var repositoryConfig = new java.util.HashMap<String, Object>(Map.of(
                 "key", repository, "name", displayName, "format", "generic", "repo_type", "local", "is_public", false));
-        if (config.apiProfile() == ArtifactKeeperApiProfile.CURRENT) repositoryConfig.put("versioning_enabled", true);
+        repositoryConfig.put("versioning_enabled", true);
         apiJson(config, "POST", "/api/v1/repositories", MAPPER.valueToTree(repositoryConfig));
         var backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
         String path = "org/app.jar";
@@ -188,15 +183,13 @@ class ArtifactKeeperLiveIntegrationTest {
             assertEquals(artifactId, grant.targetId());
             backend.apply(typedState(grant.principalId(), "user", "artifact", artifactId, Set.of("read"), Map.of()));
             assertEquals(List.of(grant), client.getPermissions());
-            if (config.apiProfile() == ArtifactKeeperApiProfile.CURRENT) {
-                apiJson(config, "PUT", "/api/v1/repositories/" + repository + "/artifacts/" + path,
-                        MAPPER.valueToTree(Map.of("fixture", "second-revision")));
-                String revisionId = apiJson(config, "GET", "/api/v1/repositories/" + repository + "/artifacts/" + path + "?version=1", null)
-                        .path("id").asText();
-                backend.apply(namedState(grant.principalId(), "user", Map.of("type", "artifact", "repository", repository,
-                        "path", path, "version", "1")));
-                assertEquals(revisionId, client.getPermissions().getFirst().targetId());
-            }
+            apiJson(config, "PUT", "/api/v1/repositories/" + repository + "/artifacts/" + path,
+                    MAPPER.valueToTree(Map.of("fixture", "second-revision")));
+            String revisionId = apiJson(config, "GET", "/api/v1/repositories/" + repository + "/artifacts/" + path + "?version=1", null)
+                    .path("id").asText();
+            backend.apply(namedState(grant.principalId(), "user", Map.of("type", "artifact", "repository", repository,
+                    "path", path, "version", "1")));
+            assertEquals(revisionId, client.getPermissions().getFirst().targetId());
         } finally {
             try { backend.apply(PactState.empty()); }
             finally { apiJson(config, "DELETE", "/api/v1/repositories/" + repository, null); }
@@ -492,7 +485,7 @@ class ArtifactKeeperLiveIntegrationTest {
                 "url", required("PACT_IT_ARTIFACT_KEEPER_URL"),
                 "token", required("PACT_IT_ARTIFACT_KEEPER_TOKEN"),
                 "per-page", Integer.toString(perPage),
-                "api-profile", System.getenv().getOrDefault("PACT_IT_ARTIFACT_KEEPER_API_PROFILE", "legacy")
+                "api-profile", System.getenv().getOrDefault("PACT_IT_ARTIFACT_KEEPER_API_PROFILE", "current")
         ));
     }
 

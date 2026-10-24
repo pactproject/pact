@@ -2,7 +2,7 @@
 set -eu
 umask 077
 
-if [ "${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-legacy}" != current ]; then
+if [ "${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-current}" != current ]; then
     echo "Kubernetes/Artifact Keeper E2E requires Artifact Keeper 1.11.1 / current" >&2
     exit 2
 fi

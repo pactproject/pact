@@ -42,7 +42,6 @@ public final class ArtifactKeeperHttpClient
     private final URI baseUri;
     private final String token;
     private final int perPage;
-    private final ArtifactKeeperApiProfile apiProfile;
 
     public ArtifactKeeperHttpClient(
             String baseUrl,
@@ -64,7 +63,7 @@ public final class ArtifactKeeperHttpClient
             String token,
             int perPage
     ) {
-        this(httpClient, objectMapper, baseUrl, token, perPage, ArtifactKeeperApiProfile.LEGACY);
+        this(httpClient, objectMapper, baseUrl, token, perPage, ArtifactKeeperApiProfile.CURRENT);
     }
 
     public ArtifactKeeperHttpClient(
@@ -90,7 +89,7 @@ public final class ArtifactKeeperHttpClient
         );
         this.token = token;
         this.perPage = perPage;
-        this.apiProfile = Objects.requireNonNull(apiProfile);
+        Objects.requireNonNull(apiProfile);
     }
 
     public ArtifactKeeperHttpClient(ArtifactKeeperConfig artifactKeeperConfig) {
@@ -108,34 +107,14 @@ public final class ArtifactKeeperHttpClient
 
     @Override
     public List<ArtifactKeeperApiUser> getUsers() throws ArtifactKeeperClientException {
-        // 1.5.1 omits is_service_account from /users. Its separate account list
-        // has no pagination envelope; do not pass it through getAllPages.
-        Set<String> serviceAccountIds = apiProfile == ArtifactKeeperApiProfile.LEGACY
-                ? getServiceAccountIds() : Set.of();
         return getAllPages(
                 "/api/v1/users",
                 node -> new ArtifactKeeperApiUser(
                         text(node, "id"),
                         text(node, "username"),
-                        apiProfile == ArtifactKeeperApiProfile.LEGACY
-                                ? serviceAccountIds.contains(text(node, "id"))
-                                : serviceAccountFlag(node)
+                        serviceAccountFlag(node)
                 )
         );
-    }
-
-    private Set<String> getServiceAccountIds() throws ArtifactKeeperClientException {
-        JsonNode response = request("GET", "/api/v1/service-accounts", null, null);
-        if (response == null || !response.path("items").isArray()) {
-            throw new ArtifactKeeperClientException(
-                    "Artifact Keeper service-account list is missing an 'items' array"
-            );
-        }
-        Set<String> ids = new HashSet<>();
-        for (JsonNode account : response.path("items")) {
-            ids.add(text(account, "id"));
-        }
-        return Set.copyOf(ids);
     }
 
     @Override

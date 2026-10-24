@@ -39,7 +39,7 @@ public final class ArtifactKeeperBackend
             String id,
             ArtifactKeeperClient client)
     {
-        this(id, client, ArtifactKeeperApiProfile.LEGACY);
+        this(id, client, ArtifactKeeperApiProfile.CURRENT);
     }
 
     public ArtifactKeeperBackend(
@@ -133,7 +133,7 @@ public final class ArtifactKeeperBackend
             List<ArtifactKeeperPermission> desired) throws ValidationException, BackendOperationException
     {
         try {
-            return new ArtifactKeeperReferenceResolver(state, client, apiProfile).resolve(desired);
+            return new ArtifactKeeperReferenceResolver(state, client).resolve(desired);
         } catch (IllegalArgumentException e) {
             throw new ValidationException(e.getMessage(), e);
         } catch (ArtifactKeeperClientException e) {

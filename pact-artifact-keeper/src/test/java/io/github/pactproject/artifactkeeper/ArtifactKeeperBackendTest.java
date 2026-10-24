@@ -10,7 +10,6 @@ import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import io.github.pactproject.api.value.Value;
 
@@ -265,7 +264,7 @@ class ArtifactKeeperBackendTest {
                 client.getUsers().get(0).id(),
                 permission.principalId()
         );
-        assertEquals("user", permission.principalType());
+        assertEquals("service_account", permission.principalType());
     }
 
     @Test
@@ -428,17 +427,16 @@ class ArtifactKeeperBackendTest {
         assertEquals(0, client.createPermissionCalls());
     }
 
-    @ParameterizedTest
-    @EnumSource(ArtifactKeeperApiProfile.class)
-    void createsServiceAccountsIdempotentlyWithProfileSpecificWireType(ArtifactKeeperApiProfile profile)
+    @Test
+    void createsServiceAccountsIdempotentlyWithCurrentWireType()
             throws Exception {
         var client = client(List.of(), List.of(REPOSITORY), List.of());
-        var backend = new ArtifactKeeperBackend("ak", client, profile);
+        var backend = new ArtifactKeeperBackend("ak", client);
         var desired = state(access("svc-build", "repository-a", Set.of("read")));
 
         backend.apply(desired);
         var created = client.getPermissions().getFirst();
-        assertEquals(profile == ArtifactKeeperApiProfile.LEGACY ? "user" : "service_account",
+        assertEquals("service_account",
                 created.principalType());
         assertTrue(client.getUsers().getFirst().serviceAccount());
 
@@ -490,12 +488,11 @@ class ArtifactKeeperBackendTest {
         assertEquals(0, client.createServiceAccountCalls());
     }
 
-    @ParameterizedTest
-    @EnumSource(ArtifactKeeperApiProfile.class)
-    void compensationRestoresServiceAccountGrantAfterPartialFailure(ArtifactKeeperApiProfile profile)
+    @Test
+    void compensationRestoresServiceAccountGrantAfterPartialFailure()
             throws Exception {
         var client = client(List.of(), List.of(REPOSITORY), List.of());
-        var backend = new ArtifactKeeperBackend("ak", client, profile);
+        var backend = new ArtifactKeeperBackend("ak", client);
         var previous = state(access("svc-build", REPOSITORY.name(), Set.of("read")));
         backend.apply(previous);
         var accountId = client.getUsers().getFirst().id();
@@ -510,7 +507,7 @@ class ArtifactKeeperBackendTest {
 
         var restored = client.getPermissions().getFirst();
         assertEquals(accountId, restored.principalId());
-        assertEquals(profile == ArtifactKeeperApiProfile.LEGACY ? "user" : "service_account",
+        assertEquals("service_account",
                 restored.principalType());
         assertEquals(Set.of("read"), restored.actions());
         assertEquals(1, client.createServiceAccountCalls());
@@ -593,11 +590,10 @@ class ArtifactKeeperBackendTest {
         assertEquals(conditions, client.getPermissions().getFirst().conditions());
     }
 
-    @ParameterizedTest
-    @EnumSource(ArtifactKeeperApiProfile.class)
-    void preservesNamedRepositoryAndMixedUsersForCustomBackendId(ArtifactKeeperApiProfile profile) throws Exception {
+    @Test
+    void preservesNamedRepositoryAndMixedUsersForCustomBackendId() throws Exception {
         var client = client(List.of(ALICE), List.of(REPOSITORY), List.of());
-        var backend = new ArtifactKeeperBackend("company-registry", client, profile);
+        var backend = new ArtifactKeeperBackend("company-registry", client);
         var desired = new PactState(Set.of("alice", "svc-build").stream().map(principal -> new Access(
                 principal, new Resource("company-registry", Map.of("name", REPOSITORY.name())),
                 Map.of("permissions", Value.set(Set.of(Value.string("read"))))
@@ -611,7 +607,7 @@ class ArtifactKeeperBackendTest {
         assertEquals("user", grants.stream().filter(p -> p.principalId().equals(ALICE.id()))
                 .findFirst().orElseThrow().principalType());
         var account = client.getUsers().stream().filter(u -> u.username().equals("svc-build")).findFirst().orElseThrow();
-        assertEquals(profile.permissionPrincipalType("service_account"), grants.stream()
+        assertEquals("service_account", grants.stream()
                 .filter(p -> p.principalId().equals(account.id())).findFirst().orElseThrow().principalType());
         backend.apply(desired);
         assertEquals(grants, client.getPermissions());

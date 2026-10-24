@@ -36,7 +36,7 @@ PACT's current backend modules do not yet follow one uniform internal layout:
 | --- | --- | --- |
 | Ranger | `compile`, `sync`, `api`, `client`, config and backend | By default reconciles every policy in the configured service; `managed-only` opts into limiting writes/deletes to policies labeled `managed`. Ensures missing policy users, creating them with random passwords that are not retained. |
 | PostgreSQL | `compile`, `model`, `sync`, `api`, `client`, config and backend | Snapshots PACT-granted ACLs; reconciles identities separately; grant rollback does not reverse password changes. |
-| Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend owns most orchestration and mutable working state; uses default `prepare` compensation. Missing `svc-` usernames trigger service-account creation. Account metadata determines logical principal types; `legacy`/`current` API profiles translate service-account permission writes. |
+| Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend owns most orchestration and mutable working state; uses default `prepare` compensation. Missing `svc-` usernames trigger service-account creation. Account metadata determines logical principal types; the current API writes service-account permissions as `service_account`; the retired `legacy` profile is rejected during backend initialization. |
 | Elasticsearch | `compile`, `model`, `api`, `client`, config and backend | Snapshots PACT-owned roles and reconciles native-user index privileges; preserves unrelated roles. |
 
 Artifact Keeper's current implementation already reflects the authoritative
@@ -302,5 +302,5 @@ mode, if offered, needs a supported way to filter that state; do not confuse a
 generic API `target_type` string with enforcement support.
 
 Elasticsearch implements its own role snapshot and compensation contract.
-Do not assume that Artifact Keeper's legacy orchestration is the PACT-wide
+Do not assume that Artifact Keeper's orchestration is the PACT-wide
 standard; retain each backend's documented scope and transaction semantics.

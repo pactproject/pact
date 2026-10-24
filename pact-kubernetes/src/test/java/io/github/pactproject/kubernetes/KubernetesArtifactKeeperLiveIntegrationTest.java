@@ -41,7 +41,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Real Kubernetes API -> provider -> core -> real Artifact Keeper, with no backend mocks. */
 @EnabledIfSystemProperty(named = "pact.integration", matches = "true")
-@EnabledIfEnvironmentVariable(named = "PACT_IT_ARTIFACT_KEEPER_API_PROFILE", matches = "current")
 @EnabledIfEnvironmentVariable(named = "PACT_IT_K8S_GROUP", matches = ".+")
 class KubernetesArtifactKeeperLiveIntegrationTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(60);

@@ -73,7 +73,7 @@ services:
       start_period: 30s
 
   artifact-keeper:
-    image: ghcr.io/artifact-keeper/artifact-keeper-backend:${ARTIFACT_KEEPER_VERSION:-1.5.1}
+    image: ghcr.io/artifact-keeper/artifact-keeper-backend:${ARTIFACT_KEEPER_VERSION:-1.11.1}
     depends_on:
       artifact-keeper-db:
         condition: service_healthy
@@ -189,7 +189,7 @@ services:
     entrypoint: ["/bin/sh", "/workspace/integration/scripts/run-kubernetes-artifact-keeper-tests.sh"]
     environment:
       PACT_IT_ARTIFACT_KEEPER_URL: http://artifact-keeper:8080
-      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-legacy}
+      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-current}
       PACT_IT_ARTIFACT_KEEPER_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_ADMIN_PASSWORD:-PactLocalAdmin2!}
       PACT_IT_ARTIFACT_KEEPER_USER: ${PACT_IT_ARTIFACT_KEEPER_USER:-pact-it-user}
       PACT_IT_K8S_NAMESPACE: pact-it
@@ -267,7 +267,7 @@ services:
       PACT_IT_RANGER_KAFKA_SERVICE_NAME: ${PACT_IT_RANGER_KAFKA_SERVICE_NAME:-dev_kafka}
       PACT_IT_RANGER_TEST_USER: ${PACT_IT_RANGER_TEST_USER:-pact-it-user}
       PACT_IT_ARTIFACT_KEEPER_URL: http://artifact-keeper:8080
-      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-legacy}
+      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-current}
       PACT_IT_ARTIFACT_KEEPER_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_ADMIN_PASSWORD:-PactLocalAdmin2!}
       PACT_IT_ARTIFACT_KEEPER_USER: ${PACT_IT_ARTIFACT_KEEPER_USER:-pact-it-user}
       PACT_IT_ARTIFACT_KEEPER_REPOSITORY: ${PACT_IT_ARTIFACT_KEEPER_REPOSITORY:-pact-it-repo-a}
@@ -299,7 +299,7 @@ services:
       PACT_IT_RANGER_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
       PACT_IT_RANGER_SERVICE_NAME: ${PACT_IT_RANGER_SERVICE_NAME:-pact-it-hdfs}
       PACT_IT_ARTIFACT_KEEPER_URL: http://artifact-keeper:8080
-      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-legacy}
+      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${PACT_IT_ARTIFACT_KEEPER_API_PROFILE:-current}
       PACT_IT_ARTIFACT_KEEPER_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_ADMIN_PASSWORD:-PactLocalAdmin2!}
       PACT_POSTGRES_USER: ${PACT_POSTGRES_USER:-pact}
       PACT_POSTGRES_PASSWORD: ${PACT_POSTGRES_PASSWORD:-pact-local-postgres}

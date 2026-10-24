@@ -28,13 +28,13 @@ changing a backend. Read `INTEGRATION_TESTS.md` before running live tests.
   `<backend_id>.name` identifies a repository, `access.users` may mix human
   usernames and `svc-*` service-account names, and missing `svc-*` accounts are
   ensured. Existing server metadata determines the account's wire principal type.
-- Keep backend API compatibility explicit through `legacy` / `current` profiles.
-  Do not retry a failed write with a different schema or hide failed catalog reads
-  behind an empty result. Document version-dependent capabilities.
-- Planned follow-up: retire Artifact Keeper 1.5.1 in a separate release, use the
-  current API contract by default, and remove legacy branches and their CI matrix
-  entry together with the corresponding documentation. Keep that removal separate
-  from the name-resolution change.
+- Artifact Keeper uses only the current API contract, tested against 1.11.1.
+  Omitted `api-profile` means `current`; explicit `legacy` must fail during
+  backend initialization before API calls. Do not restore the removed 1.5.1
+  fallback, retry writes with another schema, or hide failed catalog reads
+  behind an empty result. Image 1.0.6 is the last release supporting 1.5.1.
+- Preserve normalization of stored user-typed service-account grants on current
+  servers. Their stored representation is distinct from supporting the old API.
 - Resource names, IDs, group membership, and actual authorization enforcement
   are distinct concepts. Permission CRUD does not prove content authorization.
 - State-provider changes must preserve other backends' native target hierarchies

@@ -1,4 +1,4 @@
-name: Artifact Keeper compatibility
+name: Artifact Keeper integration
 
 on:
   pull_request:
@@ -29,17 +29,9 @@ jobs:
   compatibility:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - version: "1.5.1"
-            api_profile: legacy
-          - version: "1.11.1"
-            api_profile: current
     env:
-      ARTIFACT_KEEPER_VERSION: ${{ matrix.version }}
-      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: ${{ matrix.api_profile }}
+      ARTIFACT_KEEPER_VERSION: "1.11.1"
+      PACT_IT_ARTIFACT_KEEPER_API_PROFILE: current
       ARTIFACT_KEEPER_URL: http://localhost:8080
       ARTIFACT_KEEPER_INITIAL_PASSWORD: PactLocalInitial1!
       ARTIFACT_KEEPER_ADMIN_PASSWORD: PactLocalAdmin2!
@@ -65,8 +57,7 @@ jobs:
         run: docker compose -p pact-ak-compat -f integration/compose.yaml up -d --wait --wait-timeout 300 artifact-keeper
       - name: Bootstrap fixtures
         run: bash integration/scripts/bootstrap-artifact-keeper.sh
-      - name: Start independent TCP peers for current-profile CIDR checks
-        if: matrix.api_profile == 'current'
+      - name: Start independent TCP peers for CIDR checks
         run: |
           docker compose -p pact-ak-compat -f integration/compose.yaml --profile ak-enforcement up -d --wait --wait-timeout 60 artifact-keeper-allowed-probe artifact-keeper-denied-probe
           echo 'PACT_IT_ARTIFACT_KEEPER_ALLOWED_PROBE_URL=http://localhost:18088' >> "$GITHUB_ENV"
@@ -79,7 +70,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: artifact-keeper-${{ matrix.version }}-reports
+          name: artifact-keeper-1.11.1-reports
           path: pact-artifact-keeper/target/surefire-reports/
       - name: Remove disposable stack
         if: always()

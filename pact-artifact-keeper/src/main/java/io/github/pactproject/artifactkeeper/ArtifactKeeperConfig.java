@@ -10,12 +10,14 @@ public record ArtifactKeeperConfig(
         ArtifactKeeperApiProfile apiProfile
 ) {
     public ArtifactKeeperConfig(URI url, String token, int perPage) {
-        this(url, token, perPage, ArtifactKeeperApiProfile.LEGACY);
+        this(url, token, perPage, ArtifactKeeperApiProfile.CURRENT);
     }
 
     public static ArtifactKeeperConfig from(
             Map<String, String> config)
     {
+        ArtifactKeeperApiProfile apiProfile =
+                ArtifactKeeperApiProfile.from(config.getOrDefault("api-profile", "current"));
         URI url = URI.create(
                 require(config, "url")
         );
@@ -30,7 +32,7 @@ public record ArtifactKeeperConfig(
                 url,
                 token,
                 perPage,
-                ArtifactKeeperApiProfile.from(config.getOrDefault("api-profile", "legacy"))
+                apiProfile
         );
     }
 

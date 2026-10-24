@@ -175,18 +175,6 @@ class ArtifactKeeperNameResolutionTest {
     }
 
     @Test
-    void legacyRejectsUnsupportedNamedFeaturesBeforeWrites() {
-        var client = client(List.of());
-        var backend = new ArtifactKeeperBackend("company-registry", client, ArtifactKeeperApiProfile.LEGACY);
-        assertThrows(ValidationException.class, () -> backend.apply(state(
-                access("alice", "user", Map.of("type", "project", "name", "payments"), "read"))));
-        assertThrows(ValidationException.class, () -> backend.apply(state(
-                access("alice", "user", Map.of("type", "artifact", "repository", "repo-a", "path", "app.jar", "version", "1"), "read"))));
-        assertEquals(0, client.createPermissionCalls());
-        assertEquals(0, client.artifactReads());
-    }
-
-    @Test
     void nestedConditionsFailBeforeExistingPermissionsAreChanged() {
         var existing = new ArtifactKeeperApiPermission("keep", "user", ALICE.id(), "repository", REPO.id(), Set.of("read"));
         var client = client(List.of(existing));

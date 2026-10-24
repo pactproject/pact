@@ -1,6 +1,5 @@
 package io.github.pactproject.artifactkeeper.sync;
 
-import io.github.pactproject.artifactkeeper.ArtifactKeeperApiProfile;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiNamedObject;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperClient;
 import io.github.pactproject.artifactkeeper.client.ArtifactKeeperClientException;
@@ -16,16 +15,13 @@ import java.util.Map;
 public final class ArtifactKeeperReferenceResolver {
     private final ArtifactKeeperState state;
     private final ArtifactKeeperClient client;
-    private final ArtifactKeeperApiProfile profile;
     private List<ArtifactKeeperApiNamedObject> groups;
     private List<ArtifactKeeperApiNamedObject> projects;
     private final Map<ArtifactKey, String> artifacts = new HashMap<>();
 
-    public ArtifactKeeperReferenceResolver(ArtifactKeeperState state, ArtifactKeeperClient client,
-                                           ArtifactKeeperApiProfile profile) {
+    public ArtifactKeeperReferenceResolver(ArtifactKeeperState state, ArtifactKeeperClient client) {
         this.state = state;
         this.client = client;
-        this.profile = profile;
     }
 
     public List<ArtifactKeeperPermission> resolve(List<ArtifactKeeperPermission> desired)
@@ -52,10 +48,6 @@ public final class ArtifactKeeperReferenceResolver {
                     principalType = "service_account";
                 }
             }
-            if (profile == ArtifactKeeperApiProfile.LEGACY
-                    && (!permission.conditions().isEmpty() || principalType.equals("anonymous"))) {
-                throw new IllegalArgumentException("Anonymous and conditional grants require Artifact Keeper api-profile=current");
-            }
             resolved.add(new ArtifactKeeperPermission(permission.targetType(), target,
                     !permission.targetType().equals("repository"), principalType, principal,
                     permission.actions(), permission.conditions()));
@@ -73,9 +65,6 @@ public final class ArtifactKeeperReferenceResolver {
             case "group" -> named(groups(), "group", target);
             case "project" -> named(projects(), "project", target);
             case "artifact" -> {
-                if (profile == ArtifactKeeperApiProfile.LEGACY && permission.targetVersion() != null) {
-                    throw new IllegalArgumentException("Artifact version selectors require Artifact Keeper api-profile=current");
-                }
                 var repository = state.repositoryByName(permission.targetRepository());
                 var key = new ArtifactKey(repository.name(), target, permission.targetVersion());
                 String id = artifacts.get(key);
@@ -95,9 +84,6 @@ public final class ArtifactKeeperReferenceResolver {
     }
 
     private List<ArtifactKeeperApiNamedObject> projects() throws ArtifactKeeperClientException {
-        if (profile == ArtifactKeeperApiProfile.LEGACY) {
-            throw new IllegalArgumentException("Project name resolution requires Artifact Keeper api-profile=current");
-        }
         if (projects == null) projects = client.getProjects();
         return projects;
     }

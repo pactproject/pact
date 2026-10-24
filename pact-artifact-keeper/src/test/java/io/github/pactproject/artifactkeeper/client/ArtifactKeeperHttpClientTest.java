@@ -9,8 +9,6 @@ import io.github.pactproject.artifactkeeper.ArtifactKeeperApiProfile;
 import io.github.pactproject.artifactkeeper.ArtifactKeeperConfig;
 import io.github.pactproject.api.value.Value;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -114,9 +112,8 @@ class ArtifactKeeperHttpClientTest {
         }
     }
 
-    @ParameterizedTest
-    @EnumSource(ArtifactKeeperApiProfile.class)
-    void readsAccountTypesAndCreatesAccountWithUnchangedJsonContract(ArtifactKeeperApiProfile profile)
+    @Test
+    void readsAccountTypesAndCreatesAccountWithCurrentJsonContract()
             throws Exception, ArtifactKeeperClientException {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         AtomicReference<JsonNode> requestBody = new AtomicReference<>();
@@ -127,22 +124,15 @@ class ArtifactKeeperHttpClientTest {
                       {"id":"machine","username":"imported-bot","is_service_account":true}
                     ], "pagination":{"total_pages":1}}
                     """;
-            if (profile == ArtifactKeeperApiProfile.LEGACY) {
-                users = users.replace(",\"is_service_account\":false", "")
-                        .replace(",\"is_service_account\":true", "");
-            }
             byte[] body = users.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
         });
         server.createContext("/api/v1/service-accounts", exchange -> {
-            if ("GET".equals(exchange.getRequestMethod())) {
-                byte[] body = """
-                        {"items":[{"id":"machine","username":"imported-bot"}]}
-                        """.getBytes(StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(200, body.length);
-                exchange.getResponseBody().write(body);
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                // Account discovery must use /users metadata, with no legacy fallback reads.
+                exchange.sendResponseHeaders(405, -1);
                 exchange.close();
                 return;
             }
@@ -158,7 +148,7 @@ class ArtifactKeeperHttpClientTest {
         try {
             var client = new ArtifactKeeperHttpClient(new ArtifactKeeperConfig(
                     java.net.URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
-                    "test-token", 100, profile));
+                    "test-token", 100));
             assertEquals(List.of(
                     new ArtifactKeeperApiUser("human", "svc-human", false),
                     new ArtifactKeeperApiUser("machine", "imported-bot", true)), client.getUsers());
@@ -186,9 +176,8 @@ class ArtifactKeeperHttpClientTest {
         });
         server.start();
         try {
-            var client = new ArtifactKeeperHttpClient(new ArtifactKeeperConfig(
-                    java.net.URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
-                    "test-token", 100, ArtifactKeeperApiProfile.CURRENT));
+            var client = new ArtifactKeeperHttpClient(
+                    "http://127.0.0.1:" + server.getAddress().getPort(), "test-token");
             var error = assertThrows(ArtifactKeeperClientException.class, client::getUsers);
             assertTrue(error.getMessage().contains("is_service_account"));
         }
@@ -198,7 +187,7 @@ class ArtifactKeeperHttpClientTest {
     }
 
     @Test
-    void readsAndCreatesV151PermissionSchema()
+    void readsAndCreatesCurrentPermissionSchema()
             throws Exception, ArtifactKeeperClientException {
         AtomicReference<String> method = new AtomicReference<>();
         AtomicReference<String> query = new AtomicReference<>();

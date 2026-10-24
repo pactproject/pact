@@ -37,22 +37,21 @@ The backend accepts `name` as a repository-name alias and `permissions` as an
 An access lists principals and the `read`, `write`, `delete`, and `admin` actions.
 PACT resolves usernames and repository names to Artifact Keeper IDs before
 creating permissions. Existing principals are classified using server account
-metadata, even when their username starts with `svc-`. The `current` profile
-reads `is_service_account` from `/users`; `legacy` obtains service-account IDs
-from `/service-accounts` because 1.5.1 omits that flag from `/users`.
+metadata, even when their username starts with `svc-`. The backend requires the
+boolean `is_service_account` field from `/users`; it does not fall back to a
+separate service-account listing.
 An absent principal beginning with `svc-` is created through the service-account
 API; an absent principal with any other name is rejected. The backend does not
 manage identity passwords or API tokens, and retains created service accounts
 when their permissions are removed.
 
 Within PACT, service-account grants always have the logical type
-`service_account`. The API profile translates that type for permission writes.
-Legacy `user`-typed grants naming a service account are normalized on read and
-preserved when their actions already match. Changing profiles does not force a
-rewrite of those grants. If both wire types exist, revocation deletes every
-matching permission ID. Missing or invalid account metadata
-(the flag in `current`, or the separate list in `legacy`) fails state loading
-instead of guessing an existing account's type.
+`service_account`, which is also the type used for new permission writes.
+Previously stored `user`-typed grants naming a service account are normalized
+on read and preserved when their actions already match. If both wire types
+exist, revocation deletes every matching permission ID. Missing or invalid
+`is_service_account` metadata fails state loading instead of guessing an
+existing account's type.
 
 All four principal types are supported: `user`, `service_account`, `group`,
 and `anonymous`. Set `principal-type` in access attributes when needed;
@@ -61,7 +60,7 @@ server metadata. Group principals accept group names or UUIDs; PACT does not
 create groups or manage memberships. Anonymous principals use the nil UUID
 and may only grant `read` on repository or project targets.
 
-With `api-profile: current`, optional `allowed_cidrs: [...]` directly in the
+Optional `allowed_cidrs: [...]` directly in the
 access entry restricts a grant by client IP. PACT preserves this restriction when
 reading, diffing, creating, and compensating grants. Empty CIDR lists, malformed
 CIDRs, unknown access attributes, and conflicting CIDR restrictions for the same
@@ -125,10 +124,9 @@ an explicit UUID. Anonymous subjects remain the nil principal with read-only
 repository/project grants. Resolving a name never creates groups, projects,
 repositories, or artifacts, and never adds group memberships.
 
-Project-name lookup and artifact `version` selectors require `api-profile:
-current`; Artifact Keeper 1.5.1 has no project catalog or revision-selector
-contract. Group names and repository-qualified artifact paths work with both
-supported profiles. Explicit IDs continue to avoid optional catalog reads.
+Project names, group names, and repository-qualified artifact paths with
+optional `version` selectors use the current API contract. Explicit IDs
+continue to avoid optional catalog reads.
 
 Names are configuration references, not durable snapshots of an object ID.
 Reusing a name for another object changes what the next reconciliation targets;
@@ -146,14 +144,16 @@ error.
 
 ## API compatibility and configuration
 
-PACT supports explicit API profiles, independently of its own plugin version:
+Starting with image **1.0.7**, PACT supports only the current API contract,
+tested against Artifact Keeper **1.11.1**. Omitted `api-profile` defaults to
+`current`; explicitly setting `current` is also accepted. The retired
+`api-profile: legacy` throws an exception during backend initialization,
+before any API request. Other unknown profile values are rejected as well.
 
-| Server release used for compatibility tests | `api-profile` | Permission write type for service accounts |
-| --- | --- | --- |
-| 1.5.1 | `legacy` (default) | `user` |
-| 1.11.1 | `current` | `service_account` |
-
-The default preserves existing 1.5.1 configurations. For 1.11.1 configure:
+Image **1.0.6** is the last release supporting Artifact Keeper 1.5.1. To migrate,
+upgrade the server to 1.11.1, remove `api-profile: legacy` (or change it to
+`current`), then deploy the new PACT image. Existing repository declarations,
+mixed `users` lists, and stored user-typed service-account grants remain valid.
 
 ```yaml
 backends:
@@ -165,15 +165,12 @@ backends:
       api-profile: current
 ```
 
-`per-page` remains optional and defaults to `100`. Unknown profile names are
-rejected during backend construction. Profiles are selected by the operator;
-PACT does not guess API behavior by retrying writes after `400`/`403` responses.
-The supported matrix covers the exact releases above, not every intermediate
-or future release. Add releases to the CI matrix after checking their contract
-and authorization behavior; add another profile only when a real incompatibility
-requires it. Deprecate old profiles explicitly in release notes before removal.
+`per-page` remains optional and defaults to `100`. PACT does not guess API
+behavior by retrying writes after `400`/`403` responses. The checked server
+release is 1.11.1; compatibility with other releases requires checking their
+contract and authorization behavior, not just their version number.
 
-In both checked releases, service-account creation uses
+Service-account creation uses
 `POST /api/v1/service-accounts` with `{"name":"build"}` and returns the account's
 `id` and `username` (`svc-build`). The create response does not need an
 `is_service_account` field because the endpoint establishes its type.
@@ -202,7 +199,7 @@ and can itself fail if the external API remains unavailable or denies writes.
 ### Permission JSON contract
 
 The permission create/list JSON contract in PACT matches the tagged Artifact
-Keeper 1.5.1 server API: create uses `principal_type`, `principal_id`,
+Keeper 1.11.1 server API: create uses `principal_type`, `principal_id`,
 `target_type`, `target_id`, and `actions`; list returns those fields under
 `items` and `pagination.total_pages`. The upstream request requires principal
 and target IDs to be UUIDs. PACT resolves named repositories, projects, groups,
@@ -212,16 +209,16 @@ explicit generic target UUIDs directly. Current-profile requests also carry
 contract, while PACT declarations use the flat `allowed_cidrs` attribute. Local
 HTTP contract tests protect these shapes.
 
-The CI compatibility matrix and opt-in live tests cover both releases above,
+CI and opt-in live tests cover Artifact Keeper 1.11.1,
 including service-account creation, repeated reconciliation, grant revocation,
 and actual access to a private repository with a service-account token. Unit
-tests also cover legacy grant normalization and compensation after a partially
-applied change. The live test deletes its private repository and revokes its
+tests also cover stored user-typed service-account grant normalization and
+compensation after a partially applied change. The live test deletes its private repository and revokes its
 test token, retaining only the uniquely named service account. See
 [integration instructions](../INTEGRATION_TESTS.md). Run the tests against the
-actual deployed release before extending the supported matrix.
-The original checked server implementation is pinned at
-[Artifact Keeper 1.5.1 permissions handler](https://github.com/artifact-keeper/artifact-keeper/blob/25d498934aca6887cf27726bfa3e2c748dbdeb8e/backend/src/api/handlers/permissions.rs).
+actual deployed release before expanding compatibility claims. The permission
+contract is pinned at the
+[Artifact Keeper 1.11.1 permissions handler](https://github.com/artifact-keeper/artifact-keeper/blob/v1.11.1/backend/src/api/handlers/permissions.rs).
 
 ## Target semantics
 

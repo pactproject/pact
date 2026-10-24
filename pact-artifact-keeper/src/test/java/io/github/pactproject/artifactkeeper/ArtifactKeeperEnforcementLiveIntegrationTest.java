@@ -34,7 +34,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Effective authorization checks, always against an isolated 1.11.1/current instance. */
 @EnabledIfSystemProperty(named = "pact.integration", matches = "true")
-@EnabledIfEnvironmentVariable(named = "PACT_IT_ARTIFACT_KEEPER_API_PROFILE", matches = "current")
 class ArtifactKeeperEnforcementLiveIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newHttpClient();

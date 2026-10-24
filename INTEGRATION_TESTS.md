@@ -64,7 +64,7 @@ Set these variables in the test process:
 | `PACT_IT_ARTIFACT_KEEPER_TOKEN` | Yes | Artifact Keeper test token. |
 | `PACT_IT_ARTIFACT_KEEPER_USER` | Yes | Existing user in the test instance. |
 | `PACT_IT_ARTIFACT_KEEPER_REPOSITORY` | Yes | Existing repository in the test instance. |
-| `PACT_IT_ARTIFACT_KEEPER_API_PROFILE` | No | `legacy` (default) for 1.5.1; `current` for 1.11.1. |
+| `PACT_IT_ARTIFACT_KEEPER_API_PROFILE` | No | `current` (default), tested with 1.11.1; `legacy` fails at initialization. |
 | `PACT_IT_POSTGRESQL_JDBC_URL` | Yes | JDBC URL to an administrative database on a disposable PostgreSQL cluster. |
 | `PACT_IT_POSTGRESQL_USERNAME` | Yes | PostgreSQL account with `CREATEDB` and `CREATEROLE`. |
 | `PACT_IT_POSTGRESQL_PASSWORD` | Yes | PostgreSQL test account password. |
@@ -135,13 +135,12 @@ Artifact Keeper, and PostgreSQL tests. Its test user name and index pattern
 are generated uniquely for each run; the test cleans up only that user's
 owned PACT role and then the user itself.
 
-Artifact Keeper compatibility CI runs the exact pairs `1.5.1` / `legacy` and
-`1.11.1` / `current`. Each job uses its own disposable database and tests
-service-account creation, private repository access, idempotency, and revocation.
-Both profiles also exercise permission CRUD for repository, artifact, project,
-group, system, global, and an unfamiliar target type. The current profile adds
-CIDR-condition round trips and group/anonymous principal tests. These generic
-CRUD tests do not assert artifact-level content enforcement.
+Artifact Keeper CI tests the current API contract against 1.11.1 in its own
+fresh disposable database. It tests service-account creation, private repository
+access, idempotency, and revocation, plus permission CRUD for repository,
+artifact, project, group, system, global, and an unfamiliar target type. CIDR
+round trips and group/anonymous principal checks are always included.
+These generic CRUD tests do not assert artifact-level content enforcement.
 `ArtifactKeeperEnforcementLiveIntegrationTest` adds current-profile download
 checks: two independent TCP peers exercise permitted/denied CIDRs, alternating
 requests detect IP-insensitive authorization caching, and forged forwarding
@@ -162,13 +161,13 @@ resolvable by the test runner). Compose and compatibility CI configure these
 automatically. Without the allowed-probe URL, that one scenario is skipped;
 the other current-profile enforcement checks still run. The probe proxies use
 real TCP addresses; do not configure them as trusted forwarding proxies in AK.
-Name-resolution scenarios create temporary groups and repositories/artifacts on
-both profiles, plus projects on `current`. They verify exact name-to-ID mapping,
-repository scope, and no grant rewrite when switching a named declaration to
-the equivalent IDs. Project-name lookup and revision selectors are rejected on
-`legacy` before permission writes.
-To choose the newer pair locally, set these values in `integration/.env` before
-starting a fresh Compose project:
+Name-resolution scenarios create temporary groups, repositories/artifacts and
+projects. They verify exact name-to-ID mapping, repository scope, revision
+selectors, and no grant rewrite when switching a named declaration to equivalent
+IDs. Artifact Keeper 1.5.1 is no longer supported; `api-profile: legacy` fails
+at backend initialization before any request. Image 1.0.6 is the last compatible
+release for that server version.
+The Compose defaults and `integration/.env.example` use:
 
 ```dotenv
 ARTIFACT_KEEPER_VERSION=1.11.1
@@ -250,6 +249,6 @@ The tests create and remove only their dedicated
 that CRD to contain no existing resources cluster-wide. The generated k3s admin
 kubeconfig is shared only with the disposable runner; the runner removes its
 temporary copy on exit. `down -v` removes the cluster and credentials volume.
-The CI workflow runs these E2Es separately from both API-compatibility jobs.
+The CI workflow runs these E2Es separately from the Artifact Keeper live-test job.
 Set `PACT_INTEGRATION_TEST_IMAGE` to select a separately tagged local runner
 image; the default is `pact-integration-tests:local`.
