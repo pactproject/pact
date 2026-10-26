@@ -7,6 +7,26 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ArtifactKeeperConfigTest {
+    @org.junit.jupiter.api.Test
+    void rejectsUnknownKeysAndRetainsNonSecretDiagnosticConfiguration() {
+        var values = new java.util.HashMap<>(java.util.Map.of("url", "http://localhost:8080", "token", "hidden-token"));
+        var text = ArtifactKeeperConfig.from(values).toString();
+        org.junit.jupiter.api.Assertions.assertFalse(text.contains("hidden-token"));
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("localhost:8080") && text.contains("perPage=100"));
+        values.put("per_page", "1");
+        var error = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ArtifactKeeperConfig.from(values));
+        org.junit.jupiter.api.Assertions.assertTrue(error.getMessage().contains("per_page"));
+    }
+
+    @org.junit.jupiter.api.Test
+    void discoversRegisteredBackendFactory() {
+        var factory = java.util.ServiceLoader.load(io.github.pactproject.api.BackendFactory.class)
+                .stream().filter(provider -> provider.type().equals(ArtifactKeeperBackendFactory.class))
+                .findFirst().orElseThrow().get();
+        org.junit.jupiter.api.Assertions.assertEquals("artifact-keeper", factory.type());
+    }
+
     @Test
     void defaultsToCurrentForOmittedProfileAndConvenienceConstructor() {
         assertEquals(ArtifactKeeperApiProfile.CURRENT,

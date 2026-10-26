@@ -1,0 +1,14 @@
+extraVolumes:
+  - name: truststore
+    emptyDir: {}
+extraVolumeMounts:
+  - name: truststore
+    mountPath: /truststore
+    readOnly: true
+extraInitContainers:
+  - name: prepare-truststore
+    image: eclipse-temurin:21-jdk
+    command: ["sh", "-c", "touch /truststore/ready"]
+    volumeMounts:
+      - name: truststore
+        mountPath: /truststore

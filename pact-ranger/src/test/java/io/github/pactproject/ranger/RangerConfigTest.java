@@ -11,6 +11,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RangerConfigTest {
+    @org.junit.jupiter.api.Test
+    void rejectsUnknownKeysAndRetainsNonSecretDiagnosticConfiguration() {
+        var values = new java.util.HashMap<>(java.util.Map.of("base-url", "http://localhost:6080/service",
+                "username", "sync", "password", "hidden-password", "service-name", "analytics"));
+        var text = RangerConfig.from(values).toString();
+        org.junit.jupiter.api.Assertions.assertFalse(text.contains("hidden-password"));
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("analytics") && text.contains("sync"));
+        values.put("managed-onyl", "true");
+        var error = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> RangerConfig.from(values));
+        org.junit.jupiter.api.Assertions.assertTrue(error.getMessage().contains("managed-onyl"));
+    }
+
+    @org.junit.jupiter.api.Test
+    void discoversRegisteredBackendFactory() {
+        var factory = java.util.ServiceLoader.load(io.github.pactproject.api.BackendFactory.class)
+                .stream().filter(provider -> provider.type().equals(RangerBackendFactory.class))
+                .findFirst().orElseThrow().get();
+        org.junit.jupiter.api.Assertions.assertEquals("ranger", factory.type());
+    }
+
     @Test
     void resolvesConfigurationFromNamedRangerServiceWithoutConfiguredType() {
         RangerConfig config = RangerConfig.from(Map.of(

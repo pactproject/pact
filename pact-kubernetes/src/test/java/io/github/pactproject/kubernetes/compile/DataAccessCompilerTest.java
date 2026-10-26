@@ -24,6 +24,22 @@ class DataAccessCompilerTest
             new DataAccessCompiler();
 
     @Test
+    void preservesElasticsearchClusterRolesIndicesAndIdentityWithoutPassword() {
+        var state = compiler.compile(List.of(Map.of(
+                "identities", List.of(Map.of("backend", "search", "name", "alice", "ensure", true)),
+                "resources", List.of(
+                        Map.of("search", Map.of("cluster", "*"), "access", List.of(Map.of("users", List.of("alice"),
+                                "permissions", Map.of("cluster", List.of("monitor")), "roles", List.of("monitoring_user")))),
+                        Map.of("search", Map.of("index", "logs-*"), "access", List.of(Map.of("users", List.of("alice"),
+                                "permissions", Map.of("indices", List.of("read")))))))));
+        assertEquals(2, state.accesses().size());
+        var cluster = state.accesses().stream().filter(a -> a.resource().target().containsKey("cluster")).findFirst().orElseThrow();
+        assertEquals(Map.of("cluster", "*"), cluster.resource().target());
+        assertEquals(new SetValue(Set.of(new StringValue("monitoring_user"))), cluster.attributes().get("roles"));
+        assertEquals(Set.of(new Identity("search", "alice", true, null, null, null)), state.identities());
+    }
+
+    @Test
     void compilesResourceAndUsers()
     {
         PactState state = compiler.compile(
@@ -611,7 +627,7 @@ class DataAccessCompilerTest
                         new Identity(
                                 "analytics-db",
                                 "reporter",
-                                false,
+                                true,
                                 null,
                                 null,
                                 null
@@ -620,6 +636,40 @@ class DataAccessCompilerTest
                 state.identities()
         );
         assertTrue(state.accesses().isEmpty());
+    }
+
+    @Test
+    void expandsIdentityBackendsAndPreservesExplicitEnsureFalse() {
+        var state = compiler.compile(List.of(Map.of("resources", List.of(), "identities", List.of(
+                Map.of("backends", List.of("analytics", "search", "analytics"), "name", "app",
+                        "passwordSecretRef", Map.of("name", "credentials", "key", "password")),
+                Map.of("backend", "analytics", "name", "existing", "ensure", false)
+        ))));
+        assertEquals(Set.of(
+                new Identity("analytics", "app", true, "credentials/password", null, null),
+                new Identity("search", "app", true, "credentials/password", null, null),
+                new Identity("analytics", "existing", false, null, null, null)
+        ), state.identities());
+    }
+
+    @Test
+    void rejectsInvalidIdentityBackendsAndConflictingExpandedDeclarations() {
+        for (var declaration : List.of(
+                Map.of("name", "app"),
+                Map.of("backend", "analytics", "backends", List.of("search"), "name", "app"),
+                Map.of("backends", List.of(), "name", "app"),
+                Map.of("backends", "analytics", "name", "app"),
+                Map.of("backends", List.of("analytics", " "), "name", "app"),
+                Map.of("backends", List.of(7), "name", "app")
+        )) {
+            assertThrows(IllegalArgumentException.class, () -> compiler.compile(List.of(
+                    Map.of("resources", List.of(), "identities", List.of(declaration)))));
+        }
+        assertThrows(IllegalArgumentException.class, () -> compiler.compile(List.of(Map.of(
+                "resources", List.of(), "identities", List.of(
+                        Map.of("backends", List.of("analytics", "search"), "name", "app"),
+                        Map.of("backend", "search", "name", "app", "ensure", false)
+                )))));
     }
 
     @Test

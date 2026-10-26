@@ -1,0 +1,56 @@
+name: Elasticsearch integration
+
+on:
+  pull_request:
+    paths: ["pact-api/**", "pact-core/**", "pact-app/**", "pact-elasticsearch/**", "pact-kubernetes/**", "charts/pact/**", "integration/**", "pom.xml", ".github/workflows/elasticsearch-integration.yml"]
+  push:
+    branches: [master]
+    paths: ["pact-api/**", "pact-core/**", "pact-app/**", "pact-elasticsearch/**", "pact-kubernetes/**", "charts/pact/**", "integration/**", "pom.xml", ".github/workflows/elasticsearch-integration.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  elasticsearch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACT_IT_ELASTICSEARCH_ENDPOINT: https://localhost:19201
+      PACT_IT_ELASTICSEARCH_USERNAME: elastic
+      PACT_IT_ELASTICSEARCH_PASSWORD: PactLocalElastic2!
+      PACT_IT_ELASTICSEARCH_CA_CERTIFICATE: ${{ github.workspace }}/target/pact-es-ca.crt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Unit and HTTP contract tests
+        run: mvn -B test
+      - name: Start isolated Elasticsearch 9.2.3 with TLS
+        run: |
+          docker compose -p pact-es-923 -f integration/compose.elasticsearch.yaml up -d --wait --wait-timeout 240
+          mkdir -p target
+          docker cp pact-es-923-elasticsearch-certificates-1:/certificates/ca/ca.crt target/pact-es-ca.crt
+      - name: Live privileges, accounts, compensation and private CA
+        run: mvn -B -pl pact-elasticsearch -am -Dtest=ElasticsearchLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false -Dpact.integration=true test
+      - name: Helm lint and render
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace alpine/helm:3.16.4 lint charts/pact
+          docker run --rm -v "$PWD:/workspace" -w /workspace alpine/helm:3.16.4 template pact charts/pact > target/helm-default.yaml
+          docker run --rm -v "$PWD:/workspace" -w /workspace alpine/helm:3.16.4 template pact charts/pact -f charts/pact/examples/elasticsearch-ca.yaml > target/helm-ca.yaml
+          docker run --rm -v "$PWD:/workspace" -w /workspace alpine/helm:3.16.4 template pact charts/pact -f charts/pact/tests/extra-init.values.yaml > target/helm-init.yaml
+          python -m pip install PyYAML==6.0.2
+          python integration/scripts/check-helm.py target/helm-default.yaml target/helm-ca.yaml target/helm-init.yaml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: elasticsearch-9.2.3-reports
+          path: |
+            **/target/surefire-reports/
+            target/helm-*.yaml
+      - name: Remove disposable stack
+        if: always()
+        run: docker compose -p pact-es-923 -f integration/compose.elasticsearch.yaml down -v

@@ -207,9 +207,4 @@ class ArtifactKeeperDiffTest {
         );
     }
 
-    private static ActualArtifactKeeperPermission expectedWithoutId(
-            ActualArtifactKeeperPermission permission
-    ) {
-        return permission;
-    }
 }

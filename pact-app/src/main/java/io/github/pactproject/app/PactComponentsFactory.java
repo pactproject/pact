@@ -92,18 +92,17 @@ public final class PactComponentsFactory
         List<Backend> backends =
                 new ArrayList<>(configs.size());
 
-        for (BackendConfig config : configs) {
-            BackendFactory factory =
-                    plugins.backendFactory(
-                            config.type()
-                    );
-
-            backends.add(
-                    factory.create(
-                            config.id(),
-                            config.config()
-                    )
-            );
+        try {
+            for (BackendConfig config : configs) {
+                BackendFactory factory = plugins.backendFactory(config.type());
+                backends.add(factory.create(config.id(), config.config()));
+            }
+        } catch (PluginNotFoundException | RuntimeException e) {
+            for (var backend : backends.reversed()) {
+                try { backend.close(); }
+                catch (Exception closeFailure) { e.addSuppressed(closeFailure); }
+            }
+            throw e;
         }
 
         return List.copyOf(backends);

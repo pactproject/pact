@@ -267,7 +267,7 @@ class ArtifactKeeperLiveIntegrationTest {
         ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
         PactState initial = state(username, repositoryName, Set.of("read"));
         PactState updated = state(username, repositoryName, Set.of("read", "write"));
-        BackendTransaction create = backend.prepare(PactState.empty(), initial);
+        BackendTransaction create = backend.prepareTransaction(PactState.empty(), initial);
         BackendTransaction update = null;
 
         try {
@@ -280,7 +280,7 @@ class ArtifactKeeperLiveIntegrationTest {
                     Set.of("read")
             );
 
-            update = backend.prepare(initial, updated);
+            update = backend.prepareTransaction(initial, updated);
             update.apply();
             assertPermission(
                     client.getPermissions(),
@@ -340,7 +340,7 @@ class ArtifactKeeperLiveIntegrationTest {
         ArtifactKeeperBackend backend = new ArtifactKeeperBackend("registry", client, config.apiProfile());
         PactState desired = state(username, repositoryName, Set.of("read"));
         BackendTransaction transaction =
-                backend.prepare(PactState.empty(), desired);
+                backend.prepareTransaction(PactState.empty(), desired);
         String tokenPath = null;
 
         try {

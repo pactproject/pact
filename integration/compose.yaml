@@ -36,6 +36,9 @@ services:
       RANGER_USERNAME: ${RANGER_USERNAME:-admin}
       RANGER_PASSWORD: ${RANGER_DB_PASSWORD:-rangerR0cks!}
       RANGER_SERVICE_NAME: ${PACT_IT_RANGER_SERVICE_NAME:-pact-it-hdfs}
+      RANGER_OZONE_SERVICE_NAME: ${PACT_IT_RANGER_OZONE_SERVICE_NAME:-dev_ozone}
+      RANGER_TRINO_SERVICE_NAME: ${PACT_IT_RANGER_TRINO_SERVICE_NAME:-dev_trino}
+      RANGER_KAFKA_SERVICE_NAME: ${PACT_IT_RANGER_KAFKA_SERVICE_NAME:-dev_kafka}
     restart: "no"
 
   artifact-keeper-db:
@@ -218,7 +221,7 @@ services:
       - "${PACT_POSTGRES_PORT:-5433}:5432"
 
   pact-elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.0.0
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.2.3
     environment:
       discovery.type: single-node
       xpack.security.enabled: "true"
@@ -292,6 +295,8 @@ services:
         condition: service_completed_successfully
       pact-postgres:
         condition: service_healthy
+      pact-elasticsearch:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "/workspace/integration/scripts/run-e2e.sh"]
     environment:
       PACT_IT_RANGER_BASE_URL: http://ranger-admin:6080/service
@@ -303,6 +308,9 @@ services:
       PACT_IT_ARTIFACT_KEEPER_ADMIN_PASSWORD: ${ARTIFACT_KEEPER_ADMIN_PASSWORD:-PactLocalAdmin2!}
       PACT_POSTGRES_USER: ${PACT_POSTGRES_USER:-pact}
       PACT_POSTGRES_PASSWORD: ${PACT_POSTGRES_PASSWORD:-pact-local-postgres}
+      PACT_IT_ELASTICSEARCH_ENDPOINT: http://pact-elasticsearch:9200
+      PACT_IT_ELASTICSEARCH_USERNAME: elastic
+      PACT_IT_ELASTICSEARCH_PASSWORD: ${PACT_IT_ELASTICSEARCH_PASSWORD:-PactLocalElastic2!}
     volumes:
       - ./e2e:/etc/pact:ro
     restart: "no"

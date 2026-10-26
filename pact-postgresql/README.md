@@ -256,10 +256,9 @@ backends:
     type: postgresql
     config:
       jdbc-url: jdbc:postgresql://postgres.example:5432/postgres
-      username: pact_grant_manager
+      username: pact_admin
       password: <injected-from-a-secret>
-      reconciliation-mode: grantor
-      preserve-default-public-privileges: true
+      reconciliation-mode: authoritative
 
 stateProvider:
   type: kubernetes
@@ -280,11 +279,12 @@ resources:
 
 The PostgreSQL backend factory is registered with Java `ServiceLoader`.
 Settings `jdbc-url`, `username`, and `password` are required.
-`reconciliation-mode` is `grantor` (the default) or `authoritative`.
-`preserve-default-public-privileges` defaults to `true`; authoritative mode
-uses it to preserve PostgreSQL's built-in `PUBLIC` defaults for database
-`CONNECT`/`TEMPORARY` and routine `EXECUTE`. Set it to `false` when PACT should
-reconcile those privileges too. The JDBC URL identifies the cluster; PACT
+`reconciliation-mode` is `authoritative` (the default, requires superuser
+authority) or explicit compatibility mode `grantor`. In authoritative mode,
+PostgreSQL's built-in PUBLIC `CONNECT`/`TEMPORARY` and routine `EXECUTE` are
+ordinary ACLs and are revoked when absent from desired state. The removed
+`preserve-default-public-privileges` key is rejected at initialization.
+The JDBC URL identifies the cluster; PACT
 replaces its database part with each managed database, because object-level
 ACLs live in per-database catalogs. Object names are passed to `GRANT`/`REVOKE`
 as quoted SQL identifiers.
@@ -299,7 +299,9 @@ Rules:
   special `PUBLIC` grantee; it is not a role name or an object wildcard. The
   exact subject `PUBLIC` is reserved for this purpose.
 - `DataAccess.spec.identities` may declare roles for this backend. `ensure`
-  defaults to `false`; when true, PACT creates a missing role with `LOGIN`.
+  defaults to `true`; PACT creates a missing role with `LOGIN`. Explicit
+  `ensure: false` requires an existing role. `backends: [analytics-db, other-db]`
+  can replace singular `backend` to expand one identity across instances.
   Existing roles must have `LOGIN` when PACT is asked to set a password; PACT
   does not change existing role attributes. Removing an identity declaration
   does not drop the role.
@@ -317,7 +319,8 @@ Rules:
 - `Resource.backendId` selects the configured PostgreSQL connection.
 - PACT declarations do not express `WITH GRANT OPTION`; authoritative mode
   removes it from managed grants. Role membership, object ownership,
-  `ALTER DEFAULT PRIVILEGES` and row-level security remain out of scope.
+  and row-level security remain out of scope. `defaultPrivileges` manages
+  creator/schema-scoped native default ACLs as described above.
 - Privilege names are case-insensitive; unknown privilege or target names
   fail validation rather than being interpolated into SQL.
 - An access with no permissions expresses no grants for that role/target;
@@ -326,6 +329,25 @@ Rules:
 
 ## Grant ownership contract
 
+### Migrating earlier configuration
+
+The default changed from `grantor` to `authoritative`. To retain the previous
+grantor boundary, set `reconciliation-mode: grantor` explicitly. The new default
+requires superuser authority and may revoke any undeclared non-owner ACL in
+the databases in scope, including built-in PUBLIC privileges.
+
+Remove `preserve-default-public-privileges`; configurations retaining it fail
+initialization. Explicitly declare any PUBLIC CONNECT/TEMPORARY/EXECUTE grants
+that must remain. This change concerns actual object ACLs; it does not change
+PostgreSQL's global defaults for future objects. Creator/schema-scoped
+`defaultPrivileges` remains supported and shares ROUTINES defaults between
+functions and procedures.
+
+Explicit identities now default to `ensure: true`; use `ensure: false` when
+accounts must pre-exist. A config/default change alone does not force core to
+reconcile an equal restored state; verify a new reconciliation with complete
+desired declarations before relying on the new mode.
+
 `reconciliation-mode: grantor` preserves the original behavior. PACT reads and
 reconciles only direct ACL entries issued by the configured login, excluding
 `PUBLIC` and grants from other grantors. That login needs enough authority to
@@ -333,7 +355,7 @@ grant/revoke the configured privileges and connect to managed databases. Use a
 dedicated login; do not share it with manual grants or another independently
 reconciling backend over overlapping databases.
 
-`reconciliation-mode: authoritative` is an explicit, destructive mode for
+`reconciliation-mode: authoritative` is the default, destructive mode for
 making PACT the source of truth for direct object ACLs. It requires the
 configured login to be a PostgreSQL superuser. Within each database in scope,
 PACT compares ACLs for all grantees, including `PUBLIC`, without treating the
@@ -345,7 +367,7 @@ grant-option dependencies are then restored only when present in the desired
 state. Object-owner privileges are not revoked.
 
 Authoritative mode does not manage role membership, object ownership,
-`ALTER DEFAULT PRIVILEGES`, row-level security, or database/schema/object
+row-level security, or database/schema/object
 creation. Those paths can still confer access independently of the direct ACLs
 PACT reconciles. PACT also reconciles only databases named by the previous or
 desired state; ensure every database to be managed is represented in that
@@ -354,7 +376,8 @@ production scope.
 
 ## Provisioning the grant-manager login
 
-For a grants-only backend, use a dedicated login with `CONNECT` to each managed
+For an explicit `reconciliation-mode: grantor` grants-only backend, use a
+dedicated login with `CONNECT` to each managed
 database and `WITH GRANT OPTION` on only the privileges PACT is expected to
 delegate on pre-existing objects. The owner (or a role already entitled to
 delegate those privileges) provisions the grant options; PACT does not create
@@ -402,13 +425,16 @@ objects there. Do not grant all options indiscriminately.
 In the grants-only setup, the login does not need `SUPERUSER`, `CREATEDB`, or
 `CREATEROLE`; target roles and objects must already exist. PostgreSQL may accept
 a `GRANT` from a login that lacks the needed grant option but emit a “no
-privileges were granted” warning and make no ACL change. PACT may not report
-that warning as an error, so a successful reconciliation alone is not proof
-that the recipient received access.
+privileges were granted” warning and make no ACL change. In grantor mode,
+PACT re-reads the ACLs after applying a diff and fails reconciliation if
+desired grants are still missing or stale grants remain. This verifies direct
+ACLs; use actual SQL operations to test effective authorization.
 
-The provisioning is per existing object. Newly created objects need their
-grant options provisioned by their owner before PACT can manage grants on them;
-PACT does not manage `ALTER DEFAULT PRIVILEGES`. The live integration test
+The provisioning above is per existing object. Newly created objects need
+the appropriate grant authority provisioned by their owner. The separate
+`defaultPrivileges` declaration also manages creator/schema-scoped defaults
+and matching existing creator-owned objects, with the authority described in
+that section. The live integration test
 exercises a non-owner grant-manager with no elevated role attributes on
 PostgreSQL 18. Managed PostgreSQL products can impose additional restrictions
 and should be tested separately.
@@ -584,9 +610,10 @@ RLS support remains a design proposal and is not implemented.
 
 The backend compiles `PactState` into desired direct grants, reads actual
 grants, calculates a normalized diff, and applies `GRANT`/`REVOKE` statements
-in a JDBC transaction. A prepared `BackendTransaction` snapshots the actual
-grants in scope to compensate if another backend fails during a PACT
-reconciliation. In grantor mode the configured login is the ownership
+in a JDBC transaction. A prepared `BackendTransaction` retains the previous
+compiled declaration and the union of previous/attempted database and default
+ACL scopes. Compensation reconciles those scopes to the previous declaration,
+not to a snapshot of manually changed grants. In grantor mode the configured login is the ownership
 boundary; in authoritative mode ACLs are reconciled regardless of grantor.
 Database and role identifiers are quoted as SQL identifiers with embedded
 quotes escaped; they are not interpolated as unquoted SQL. Passwords and
@@ -616,6 +643,19 @@ identity does not drop the role.
 
 ## Testing
 
+Recovery preparation includes databases/default-privilege scopes from failed
+transitions, in addition to previous and current declarations. They extend cleanup
+scope without contributing desired grants. Context is held only in core memory
+and is lost on restart. [DIAGNOSTICS.md](../DIAGNOSTICS.md) distinguishes planned
+grants, executed SQL and committed database transactions; identity SQL containing
+passwords is never logged.
+
+See the [shared test contract and coverage map](../TESTING.md). The two-database
+unit failure test checks backend compensation using a stateful fake; native
+JDBC commit/rollback and ACL behavior require the opt-in live suite. Its separate
+two-database scenario injects a failure after a real commit, then checks
+compensation and retry using actual ACL reads.
+
 The backend has unit tests for grant compilation, synchronization, JDBC
 behavior, and role identity reconciliation. Its opt-in
 `PostgreSqlLiveIntegrationTest` creates a uniquely named temporary database
@@ -623,8 +663,8 @@ and role, verifies direct grants across PostgreSQL object levels, updates
 grants and the role password, tests login with the new password, and removes
 the temporary database and role. It also verifies grantor-mode reconciliation
 through a delegated non-superuser login and authoritative-mode cleanup across
-grantors, grant-option removal, the `PUBLIC` subject, and preservation or
-revocation of built-in `PUBLIC` defaults. Run it only against a disposable
+grantors, grant-option removal, the `PUBLIC` subject, and
+revocation of undeclared built-in PUBLIC privileges. Run it only against a disposable
 cluster with a test login that has `CREATEDB` and `CREATEROLE`; see
 [`INTEGRATION_TESTS.md`](../INTEGRATION_TESTS.md). The local Compose `tests`
 profile runs this test against its disposable PostgreSQL service.

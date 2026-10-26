@@ -44,15 +44,30 @@ public final class PostgreSqlBackend implements Backend {
     }
 
     @Override
-    public void apply(PactState state) throws BackendException {
-        prepare(PactState.empty(), state).apply();
+    public void validateIdentities(Set<Identity> identities) throws ValidationException {
+        for (Identity identity : identities) {
+            if (!id.equals(identity.backendId())) {
+                throw new ValidationException("Identity backend does not match PostgreSQL backend '" + id + "'");
+            }
+        }
     }
 
     @Override
-    public BackendTransaction prepare(
+    public void apply(PactState state) throws BackendException {
+        prepareTransaction(PactState.empty(), state).apply();
+    }
+
+    @Override
+    public BackendTransaction prepareTransaction(
             PactState previousState,
             PactState desiredState
     ) throws BackendException {
+        return prepareTransaction(previousState, desiredState, Set.of());
+    }
+
+    @Override
+    public BackendTransaction prepareTransaction(PactState previousState, PactState desiredState,
+            Set<PactState> recoveryStates) throws BackendException {
         CompiledPostgreSqlState previous = compileState(previousState);
         CompiledPostgreSqlState desired = compileState(desiredState);
         Set<Grant> desiredGrants = desired.grants();
@@ -64,19 +79,24 @@ public final class PostgreSqlBackend implements Backend {
                 GrantCompiler.databases(previousState, id)
         );
         databases.addAll(GrantCompiler.databases(desiredState, id));
-        Set<String> scope = Set.copyOf(databases);
         Set<DefaultPrivilegeScope> defaultScopes = new HashSet<>(
                 previous.defaultPrivilegeScopes()
         );
         defaultScopes.addAll(desired.defaultPrivilegeScopes());
-        Set<DefaultPrivilegeScope> snapshotDefaultScopes =
+        for (PactState recoveryState : recoveryStates) {
+            var recovery = compileState(recoveryState);
+            compileIdentities(recoveryState);
+            databases.addAll(GrantCompiler.databases(recoveryState, id));
+            defaultScopes.addAll(recovery.defaultPrivilegeScopes());
+        }
+        Set<String> scope = Set.copyOf(databases);
+        Set<DefaultPrivilegeScope> transitionDefaultScopes =
                 Set.copyOf(defaultScopes);
-        Set<Grant> snapshot;
-        Set<DefaultPrivilegeGrant> defaultSnapshot;
+        Set<Grant> observedGrants;
         try {
-            snapshot = client.getManagedGrants(scope);
-            defaultSnapshot = client.getManagedDefaultPrivileges(
-                    snapshotDefaultScopes
+            observedGrants = client.getManagedGrants(scope);
+            client.getManagedDefaultPrivileges(
+                    transitionDefaultScopes
             );
         }
         catch (PostgreSqlClientException e) {
@@ -88,18 +108,22 @@ public final class PostgreSqlBackend implements Backend {
         }
         log.debug(
                 "Prepared PostgreSQL backend '{}' with {} desired grant(s), "
-                        + "{} snapshot grant(s), {} database(s), and {} desired identity/identities",
+                        + "{} actual grant(s), {} database(s), and {} desired identity/identities",
                 id,
                 desiredGrants.size(),
-                snapshot.size(),
+                observedGrants.size(),
                 scope.size(),
                 desiredIdentities.size()
         );
         Set<DefaultPrivilegeOverride> defaultOverrides =
                 desired.defaultPrivilegeOverrides();
+        log.debug("backend={} phase=prepare databases={} desired_grants={} desired_defaults={} cleanup_default_scopes={}",
+                id, scope, desiredGrants, desired.defaultPrivileges(), transitionDefaultScopes);
         return new BackendTransaction() {
             @Override
             public void apply() throws BackendException {
+                desiredIdentities.forEach(identity -> log.debug("backend={} action=reconcile_identity principal={} ensure={} password_update_requested={}",
+                        id, identity.principal(), identity.ensure(), identity.password() != null));
                 log.info(
                         "Reconciling PostgreSQL backend '{}' ({} identity/identities, "
                                 + "{} grant(s) across {} database(s))",
@@ -116,7 +140,7 @@ public final class PostgreSqlBackend implements Backend {
                         scope,
                         desiredGrants,
                         desired.defaultPrivileges(),
-                        snapshotDefaultScopes,
+                        transitionDefaultScopes,
                         defaultOverrides,
                         "apply"
                 );
@@ -129,15 +153,15 @@ public final class PostgreSqlBackend implements Backend {
                         "Rolling back PostgreSQL grants for backend '{}' "
                                 + "({} grant(s) across {} database(s))",
                         id,
-                        snapshot.size(),
+                        previous.grants().size(),
                         scope.size()
                 );
                 synchronize(
                         scope,
-                        snapshot,
-                        defaultSnapshot,
-                        snapshotDefaultScopes,
-                        Set.of(),
+                        previous.grants(),
+                        previous.defaultPrivileges(),
+                        transitionDefaultScopes,
+                        previous.defaultPrivilegeOverrides(),
                         "rollback"
                 );
                 log.info("Rolled back PostgreSQL grants for backend '{}'", id);
@@ -197,6 +221,7 @@ public final class PostgreSqlBackend implements Backend {
             Set<DefaultPrivilegeOverride> overrides,
             String operation
     ) throws BackendException {
+        log.debug("backend={} phase={} databases={} target_grants={} target_defaults={}", id, operation, databases, desired, defaults);
         try {
             client.synchronize(
                     databases, desired, defaults, defaultScopes, overrides

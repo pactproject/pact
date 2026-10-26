@@ -46,10 +46,10 @@ principals accept exact group names or UUIDs. See the [Artifact Keeper model and
 For a custom backend ID, use `users` for principal names/IDs; the `principals`
 alias is supplied by the specialized `registry` compiler.
 
-### PostgreSQL identities
+### Identities
 
-`DataAccess.spec.identities` can declare PostgreSQL roles separately from
-grants. A referenced password is read from a Kubernetes Secret in the same
+`DataAccess.spec.identities` can declare PostgreSQL roles and Elasticsearch
+native users separately from grants. A referenced password is read from a Kubernetes Secret in the same
 namespace as the `DataAccess`:
 
 ```yaml
@@ -63,8 +63,9 @@ identities:
 resources: []
 ```
 
-`ensure` defaults to `false`: the PostgreSQL role must already exist unless
-creation is explicitly enabled. `passwordSecretRef` is optional. Existing
+`ensure` defaults to `true`; explicitly set `false` to require an existing
+account. Elasticsearch creation also requires backend `principal-mode: ensure`.
+`passwordSecretRef` is optional. Existing PostgreSQL
 roles must have `LOGIN` when PACT is asked to set a password; PACT does not
 change existing role attributes. PACT does not delete roles when an identity
 declaration is removed. Each backend/principal identity must be declared by
@@ -75,6 +76,25 @@ default resync interval is five seconds, so rotation is applied on the next
 resync. A missing or invalid Secret reports an error and is retried by a later
 resync. Passwords are not written to `DataAccess` status or applied-state
 snapshots.
+
+Use `backends` instead of `backend` to ensure the same named identity across
+several configured instances, each of which must support explicit identities:
+
+```yaml
+identities:
+  - backends: [analytics-db, search]
+    name: app
+    passwordSecretRef: {name: app-credentials, key: password}
+resources: []
+```
+
+Exactly one of `backend` or `backends` is required; the list must be non-empty.
+Each backend/principal pair has independent ownership and persisted password
+version. One Secret read supplies consistent data to identities sharing that
+Secret within a resolution. Removing a backend from the list removes its
+identity declaration without deleting its account. Ranger and Artifact Keeper
+currently reject explicit identities with a checked not-implemented error;
+their existing principal ensure behavior from access declarations is separate.
 
 ### Target lists
 

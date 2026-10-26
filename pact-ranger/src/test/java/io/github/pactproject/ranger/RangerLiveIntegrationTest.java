@@ -161,7 +161,7 @@ class RangerLiveIntegrationTest {
         );
         List<BackendTransaction> transactions = new ArrayList<>();
         try {
-            BackendTransaction create = backend.prepare(PactState.empty(), initial);
+            BackendTransaction create = backend.prepareTransaction(PactState.empty(), initial);
             transactions.add(create);
             create.apply();
             assertPolicy(
@@ -173,7 +173,7 @@ class RangerLiveIntegrationTest {
                     Set.of(accessTypes.get(0))
             );
 
-            BackendTransaction update = backend.prepare(initial, updated);
+            BackendTransaction update = backend.prepareTransaction(initial, updated);
             transactions.add(update);
             update.apply();
             List<JsonNode> afterUpdate = sync.getPoliciesInScope();
@@ -186,7 +186,7 @@ class RangerLiveIntegrationTest {
                     Set.copyOf(accessTypes)
             );
 
-            BackendTransaction idempotent = backend.prepare(updated, updated);
+            BackendTransaction idempotent = backend.prepareTransaction(updated, updated);
             transactions.add(idempotent);
             idempotent.apply();
 
@@ -211,7 +211,7 @@ class RangerLiveIntegrationTest {
                     idempotentPolicy.path("conditions").toString()
             );
 
-            BackendTransaction delete = backend.prepare(updated, PactState.empty());
+            BackendTransaction delete = backend.prepareTransaction(updated, PactState.empty());
             transactions.add(delete);
             delete.apply();
             assertTrue(sync.getPoliciesInScope().isEmpty());

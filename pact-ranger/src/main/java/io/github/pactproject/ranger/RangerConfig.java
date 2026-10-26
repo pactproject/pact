@@ -22,6 +22,9 @@ public record RangerConfig(
     }
 
     public static RangerConfig from(Map<String, String> config) {
+        var unsupported = new java.util.TreeSet<>(config.keySet());
+        unsupported.removeAll(java.util.Set.of("base-url", "username", "password", "service-name", "page-size", "managed-only"));
+        if (!unsupported.isEmpty()) throw new IllegalArgumentException("Unsupported Ranger config key(s): " + unsupported);
         URI baseUrl = URI.create(require(config, "base-url"));
         if (!baseUrl.isAbsolute()
                 || !("http".equalsIgnoreCase(baseUrl.getScheme())
@@ -80,5 +83,11 @@ public record RangerConfig(
             );
         }
         return value;
+    }
+
+    @Override public String toString() {
+        return "RangerConfig[baseUrl=" + io.github.pactproject.api.DiagnosticSanitizer.redact(String.valueOf(baseUrl), password)
+                + ", username=" + username + ", password=[REDACTED], serviceName=" + serviceName
+                + ", pageSize=" + pageSize + ", managedOnly=" + managedOnly + "]";
     }
 }

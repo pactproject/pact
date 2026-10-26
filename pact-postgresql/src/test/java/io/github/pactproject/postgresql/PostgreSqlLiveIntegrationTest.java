@@ -45,6 +45,76 @@ class PostgreSqlLiveIntegrationTest {
     private static final String UPDATED_PASSWORD = "PactIt-updated-password";
 
     @Test
+    void restoresPreviousDeclarationAfterRealDatabaseCommitAndInjectedLaterFailure() throws Exception {
+        var config = PostgreSqlConfig.from(Map.of("jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
+                "username", required("PACT_IT_POSTGRESQL_USERNAME"), "password", required("PACT_IT_POSTGRESQL_PASSWORD")));
+        var jdbc = new JdbcPostgreSqlClient(config);
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String first = "pact_it_a_" + suffix;
+        String second = "pact_it_z_" + suffix;
+        String role = "pact_it_role_" + suffix;
+        var armed = new java.util.concurrent.atomic.AtomicBoolean();
+        // Fault injection is outside JDBC: the first database really commits before failure.
+        var faulting = new io.github.pactproject.postgresql.api.PostgreSqlClient() {
+            public Set<Grant> getManagedGrants(Set<String> databases)
+                    throws io.github.pactproject.postgresql.api.PostgreSqlClientException {
+                return jdbc.getManagedGrants(databases);
+            }
+            public Set<DefaultPrivilegeGrant> getManagedDefaultPrivileges(Set<DefaultPrivilegeScope> scopes)
+                    throws io.github.pactproject.postgresql.api.PostgreSqlClientException {
+                return jdbc.getManagedDefaultPrivileges(scopes);
+            }
+            public void reconcileIdentities(Set<Identity> previous, Set<Identity> desired)
+                    throws io.github.pactproject.postgresql.api.PostgreSqlClientException {
+                jdbc.reconcileIdentities(previous, desired);
+            }
+            public void synchronize(Set<String> databases, Set<Grant> grants,
+                    Set<DefaultPrivilegeGrant> defaults, Set<DefaultPrivilegeScope> scopes,
+                    Set<io.github.pactproject.postgresql.model.DefaultPrivilegeOverride> overrides)
+                    throws io.github.pactproject.postgresql.api.PostgreSqlClientException {
+                assertTrue(defaults.isEmpty() && scopes.isEmpty() && overrides.isEmpty());
+                for (String database : new java.util.TreeSet<>(databases)) {
+                    var local = grants.stream().filter(grant -> database.equals(grant.database()))
+                            .collect(java.util.stream.Collectors.toSet());
+                    jdbc.synchronize(Set.of(database), local, Set.of(), Set.of(), Set.of());
+                    if (armed.compareAndSet(true, false)) {
+                        throw new io.github.pactproject.postgresql.api.PostgreSqlClientException("Injected failure after commit");
+                    }
+                }
+            }
+        };
+        try {
+            createDatabase(config, first);
+            createDatabase(config, second);
+            try (var connection = adminConnection(config); var statement = connection.createStatement()) {
+                statement.execute("CREATE ROLE " + quoteIdentifier(role) + " NOLOGIN");
+            }
+            var firstConnect = permissionAccess(role, Map.of("database", first), Map.of("database", Set.of("CONNECT")));
+            var secondConnect = permissionAccess(role, Map.of("database", second), Map.of("database", Set.of("CONNECT")));
+            var previous = new PactState(Set.of(firstConnect, new Access(role,
+                    new Resource(BACKEND_ID, Map.of("database", second)), Map.of())));
+            var desired = new PactState(Set.of(secondConnect));
+            var backend = new PostgreSqlBackend(BACKEND_ID, faulting);
+            backend.prepareTransaction(PactState.empty(), previous).apply();
+            var expected = Set.of(new Grant(new GrantTarget(first, null, null, null), role, Privilege.CONNECT));
+            assertEquals(expected, jdbc.getManagedGrants(Set.of(first, second)));
+
+            var transaction = backend.prepareTransaction(previous, desired);
+            armed.set(true);
+            assertThrows(BackendOperationException.class, transaction::apply);
+            assertTrue(jdbc.getManagedGrants(Set.of(first, second)).isEmpty(), "The first commit is visible externally");
+            transaction.rollback();
+            assertEquals(expected, jdbc.getManagedGrants(Set.of(first, second)));
+            backend.prepareTransaction(previous, desired).apply();
+            assertEquals(Set.of(new Grant(new GrantTarget(second, null, null, null), role, Privilege.CONNECT)),
+                    jdbc.getManagedGrants(Set.of(first, second)));
+        } finally {
+            try { dropDatabaseAndRole(config, first); }
+            finally { dropDatabaseAndRole(config, second, role); }
+        }
+    }
+
+    @Test
     void reconcilesDatabaseObjectGrantsAndRoleIdentity() throws Exception {
         PostgreSqlConfig config = PostgreSqlConfig.from(Map.of(
                 "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
@@ -71,7 +141,7 @@ class PostgreSqlLiveIntegrationTest {
                     "v1",
                     Set.of("SELECT")
             );
-            backend.prepare(PactState.empty(), initial).apply();
+            backend.prepareTransaction(PactState.empty(), initial).apply();
             assertEquals(
                     expectedGrants(database, schemaName, role, "SELECT"),
                     client.getManagedGrants(Set.of(database))
@@ -86,14 +156,14 @@ class PostgreSqlLiveIntegrationTest {
                     "v2",
                     Set.of("INSERT")
             );
-            backend.prepare(initial, updated).apply();
+            backend.prepareTransaction(initial, updated).apply();
             assertEquals(
                     expectedGrants(database, schemaName, role, "INSERT"),
                     client.getManagedGrants(Set.of(database))
             );
             assertCanLogin(config, database, role, UPDATED_PASSWORD);
 
-            backend.prepare(updated, PactState.empty()).apply();
+            backend.prepareTransaction(updated, PactState.empty()).apply();
             assertTrue(client.getManagedGrants(Set.of(database)).isEmpty());
         }
         finally {
@@ -135,7 +205,8 @@ class PostgreSqlLiveIntegrationTest {
                     Map.of(
                             "jdbc-url", adminConfig.jdbcUrl(),
                             "username", grantManager,
-                            "password", grantManagerPassword
+                            "password", grantManagerPassword,
+                            "reconciliation-mode", "grantor"
                     )
             );
             JdbcPostgreSqlClient client =
@@ -145,7 +216,7 @@ class PostgreSqlLiveIntegrationTest {
             PactState desired = grantsOnlyState(database, schema, appRole);
 
             assertNoElevatedRoleAttributes(adminConfig, grantManager);
-            backend.prepare(PactState.empty(), desired).apply();
+            backend.prepareTransaction(PactState.empty(), desired).apply();
             assertEquals(
                     Set.of(
                             grant(
@@ -176,7 +247,7 @@ class PostgreSqlLiveIntegrationTest {
                     schema
             );
 
-            backend.prepare(desired, PactState.empty()).apply();
+            backend.prepareTransaction(desired, PactState.empty()).apply();
             assertTrue(client.getManagedGrants(Set.of(database)).isEmpty());
         }
         finally {
@@ -224,7 +295,8 @@ class PostgreSqlLiveIntegrationTest {
                     Map.of(
                             "jdbc-url", adminConfig.jdbcUrl(),
                             "username", grantManager,
-                            "password", grantManagerPassword
+                            "password", grantManagerPassword,
+                            "reconciliation-mode", "grantor"
                     )
             );
             PostgreSqlBackend backend = new PostgreSqlBackend(
@@ -235,7 +307,7 @@ class PostgreSqlLiveIntegrationTest {
 
             assertThrows(
                     BackendOperationException.class,
-                    () -> backend.prepare(PactState.empty(), desired).apply()
+                    () -> backend.prepareTransaction(PactState.empty(), desired).apply()
             );
         }
         finally {
@@ -250,7 +322,7 @@ class PostgreSqlLiveIntegrationTest {
     }
 
     @Test
-    void authoritativeModeReconcilesAclAcrossGrantorsAndPreservesPublicDefaults()
+    void authoritativeDefaultReconcilesAclAcrossGrantorsAndRevokesUndeclaredPublicDefaults()
             throws Exception {
         PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
                 "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
@@ -282,9 +354,7 @@ class PostgreSqlLiveIntegrationTest {
                     Map.of(
                             "jdbc-url", adminConfig.jdbcUrl(),
                             "username", adminConfig.username(),
-                            "password", adminConfig.password(),
-                            "reconciliation-mode", "authoritative",
-                            "preserve-default-public-privileges", "true"
+                            "password", adminConfig.password()
                     )
             );
             JdbcPostgreSqlClient client =
@@ -312,13 +382,13 @@ class PostgreSqlLiveIntegrationTest {
             );
             assertThrows(
                     BackendOperationException.class,
-                    () -> nonSuperuserBackend.prepare(
+                    () -> nonSuperuserBackend.prepareTransaction(
                             PactState.empty(),
                             desired
                     )
             );
 
-            backend.prepare(PactState.empty(), desired).apply();
+            backend.prepareTransaction(PactState.empty(), desired).apply();
             assertEquals(
                     Set.of(
                             grant(
@@ -360,53 +430,28 @@ class PostgreSqlLiveIntegrationTest {
                     appPassword,
                     schema
             );
-            assertCanSelect(
+            assertThrows(SQLException.class, () -> assertCanSelect(
                     adminConfig,
                     database,
                     oldGrantor,
                     oldGrantorPassword,
                     schema
-            );
-            assertPublicDefaultsPreserved(
+            ));
+            assertPublicDefaultsRevoked(
                     adminConfig,
                     database,
                     schema
             );
             assertNoGrantOptions(adminConfig, database, schema);
 
-            backend.prepare(desired, PactState.empty()).apply();
+            backend.prepareTransaction(desired, PactState.empty()).apply();
             assertTrue(client.getManagedGrants(Set.of(database)).isEmpty());
-            assertPublicDefaultsPreserved(
-                    adminConfig,
-                    database,
-                    schema
-            );
-
-            PostgreSqlConfig manageDefaultsConfig =
-                    PostgreSqlConfig.from(Map.of(
-                            "jdbc-url", adminConfig.jdbcUrl(),
-                            "username", adminConfig.username(),
-                            "password", adminConfig.password(),
-                            "reconciliation-mode", "authoritative",
-                            "preserve-default-public-privileges", "false"
-                    ));
-            JdbcPostgreSqlClient manageDefaultsClient =
-                    new JdbcPostgreSqlClient(manageDefaultsConfig);
-            PostgreSqlBackend manageDefaultsBackend =
-                    new PostgreSqlBackend(BACKEND_ID, manageDefaultsClient);
-            manageDefaultsBackend.prepare(
-                    PactState.empty(),
-                    desired
-            ).apply();
             assertPublicDefaultsRevoked(
                     adminConfig,
                     database,
                     schema
             );
-            manageDefaultsBackend.prepare(
-                    desired,
-                    PactState.empty()
-            ).apply();
+
         }
         finally {
             dropDatabaseAndRole(
@@ -420,7 +465,7 @@ class PostgreSqlLiveIntegrationTest {
     }
 
     @Test
-    void authoritativeAdoptionPreservesExistingObjectsAndCanRollback()
+    void authoritativeAdoptionPreservesObjectsAndRollbackReappliesEmptyDeclaration()
             throws Exception {
         PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
                 "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
@@ -592,7 +637,7 @@ class PostgreSqlLiveIntegrationTest {
                             + ", 'UPDATE')"
             ));
 
-            var transaction = backend.prepare(PactState.empty(), desired);
+            var transaction = backend.prepareTransaction(PactState.empty(), desired);
             transaction.apply();
             Set<Grant> expectedGrants = Set.of(
                     grant(new GrantTarget(database, null, null, null),
@@ -642,16 +687,16 @@ class PostgreSqlLiveIntegrationTest {
 
             transaction.rollback();
             assertEquals(
-                    existingGrants,
+                    Set.of(),
                     client.getManagedGrants(Set.of(database))
             );
             assertTablePrivilege(
                     adminConfig, database, runtime, salesSchema, ordersTable,
-                    "UPDATE", true
+                    "UPDATE", false
             );
             assertTablePrivilege(
                     adminConfig, database, obsoleteRole, salesSchema, ordersTable,
-                    "SELECT", true
+                    "SELECT", false
             );
             assertEquals(
                     owner,
@@ -838,7 +883,8 @@ class PostgreSqlLiveIntegrationTest {
                     Map.of(
                             "jdbc-url", adminConfig.jdbcUrl(),
                             "username", grantManager,
-                            "password", grantManagerPassword
+                            "password", grantManagerPassword,
+                            "reconciliation-mode", "grantor"
                     )
             );
             client = new JdbcPostgreSqlClient(grantManagerConfig);
@@ -855,7 +901,7 @@ class PostgreSqlLiveIntegrationTest {
                     adminConfig, database, externalRole, externalSchema, table,
                     "SELECT", true
             );
-            backend.prepare(PactState.empty(), desired).apply();
+            backend.prepareTransaction(PactState.empty(), desired).apply();
 
             assertEquals(
                     Set.of(
@@ -914,7 +960,7 @@ class PostgreSqlLiveIntegrationTest {
                     tableRowCount(adminConfig, database, externalSchema, table)
             );
 
-            backend.prepare(desired, PactState.empty()).apply();
+            backend.prepareTransaction(desired, PactState.empty()).apply();
             assertTablePrivilege(
                     adminConfig, database, runtime, managedSchema, table,
                     "SELECT", false
@@ -995,7 +1041,7 @@ class PostgreSqlLiveIntegrationTest {
                     ),
                     Map.of("column", Set.of("SELECT"))
             )));
-            backend.prepare(PactState.empty(), desired).apply();
+            backend.prepareTransaction(PactState.empty(), desired).apply();
 
             assertTrue(hasPrivilege(
                     adminConfig,
@@ -1006,7 +1052,7 @@ class PostgreSqlLiveIntegrationTest {
                             + quoteLiteral(column) + ", 'SELECT')"
             ));
 
-            backend.prepare(desired, PactState.empty()).apply();
+            backend.prepareTransaction(desired, PactState.empty()).apply();
         }
         finally {
             dropDatabaseAndRole(adminConfig, database, owner);
@@ -1014,7 +1060,7 @@ class PostgreSqlLiveIntegrationTest {
     }
 
     @Test
-    void authoritativeModeAdoptsAndRollsBackExistingDefaultPrivileges()
+    void authoritativeModeAdoptsDefaultsAndRollbackRemovesUndeclaredDefaults()
             throws Exception {
         PostgreSqlConfig adminConfig = PostgreSqlConfig.from(Map.of(
                 "jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
@@ -1125,7 +1171,7 @@ class PostgreSqlLiveIntegrationTest {
                             routineScope, runtime, Privilege.EXECUTE
                     )
             );
-            var transaction = backend.prepare(PactState.empty(), desired);
+            var transaction = backend.prepareTransaction(PactState.empty(), desired);
             transaction.apply();
 
             assertEquals(desiredDefaults, client.getManagedDefaultPrivileges(scopes));
@@ -1202,7 +1248,7 @@ class PostgreSqlLiveIntegrationTest {
             ));
 
             transaction.rollback();
-            assertEquals(existingDefaults, client.getManagedDefaultPrivileges(scopes));
+            assertEquals(Set.of(), client.getManagedDefaultPrivileges(scopes));
         }
         finally {
             dropDatabaseAndRole(
@@ -1290,7 +1336,7 @@ class PostgreSqlLiveIntegrationTest {
                 PactState desired = defaultPrivilegesState(
                         database, schema, creator, runtime
                 );
-                backend.prepare(PactState.empty(), desired).apply();
+                backend.prepareTransaction(PactState.empty(), desired).apply();
 
                 DefaultPrivilegeScope tableDefaults = new DefaultPrivilegeScope(
                         database, schema, creator, DefaultPrivilegeType.TABLES
@@ -1419,7 +1465,7 @@ class PostgreSqlLiveIntegrationTest {
                                 + ", 'SELECT')"
                 ));
 
-                backend.prepare(desired, PactState.empty()).apply();
+                backend.prepareTransaction(desired, PactState.empty()).apply();
                 assertTrue(client.getManagedDefaultPrivileges(Set.of(
                         tableDefaults, sequenceDefaults, routineDefaults
                 )).isEmpty());
@@ -1495,7 +1541,7 @@ class PostgreSqlLiveIntegrationTest {
                                 Map.of("database", Set.of("CONNECT", "CREATE"))
                         )
                 ));
-                backend.prepare(PactState.empty(), bootstrap).apply();
+                backend.prepareTransaction(PactState.empty(), bootstrap).apply();
 
                 try (Connection connection = databaseConnection(
                         adminConfig,
@@ -1581,7 +1627,7 @@ class PostgreSqlLiveIntegrationTest {
                                 )
                         )
                 ));
-                backend.prepare(bootstrap, desired).apply();
+                backend.prepareTransaction(bootstrap, desired).apply();
 
                 assertTablePrivilege(
                         adminConfig, database, developer, appSchema, "records",
@@ -1743,7 +1789,7 @@ class PostgreSqlLiveIntegrationTest {
                                 + quoteLiteral(database) + ", 'CREATE')"
                 ));
 
-                backend.prepare(desired, PactState.empty()).apply();
+                backend.prepareTransaction(desired, PactState.empty()).apply();
             }
             finally {
                 dropDatabaseAndRole(
@@ -1883,59 +1929,6 @@ class PostgreSqlLiveIntegrationTest {
         );
         accesses.add(publicAccess);
         return new PactState(Set.copyOf(accesses), Set.of());
-    }
-
-    private static void assertPublicDefaultsPreserved(
-            PostgreSqlConfig config,
-            String database,
-            String schema
-    ) throws SQLException {
-        String sql = """
-                SELECT
-                    EXISTS (
-                        SELECT 1
-                        FROM pg_catalog.pg_database AS d
-                        CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(
-                                d.datacl,
-                                pg_catalog.acldefault('d', d.datdba)
-                            )
-                        ) AS acl
-                        WHERE d.datname = %s
-                          AND acl.grantee = 0
-                          AND acl.privilege_type = 'CONNECT'
-                    ),
-                    EXISTS (
-                        SELECT 1
-                        FROM pg_catalog.pg_proc AS p
-                        JOIN pg_catalog.pg_namespace AS n
-                          ON n.oid = p.pronamespace
-                        CROSS JOIN LATERAL pg_catalog.aclexplode(
-                            COALESCE(
-                                p.proacl,
-                                pg_catalog.acldefault('f', p.proowner)
-                            )
-                        ) AS acl
-                        WHERE n.nspname = %s
-                          AND p.proname = 'increment'
-                          AND acl.grantee = 0
-                          AND acl.privilege_type = 'EXECUTE'
-                    )
-                """.formatted(
-                quoteLiteral(database),
-                quoteLiteral(schema)
-        );
-        try (Connection connection = databaseConnection(
-                config,
-                database,
-                config.username(),
-                config.password()
-        ); Statement statement = connection.createStatement();
-             var rows = statement.executeQuery(sql)) {
-            assertTrue(rows.next());
-            assertTrue(rows.getBoolean(1));
-            assertTrue(rows.getBoolean(2));
-        }
     }
 
     private static void assertPublicDefaultsRevoked(

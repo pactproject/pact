@@ -127,7 +127,7 @@ class ArtifactKeeperNameResolutionTest {
         var backend = backend(client);
         var previous = state(access("alice", "user", Map.of("type", "artifact", "repository", "repo-a", "path", "app.jar"), "read"));
         backend.apply(previous);
-        var transaction = backend.prepare(previous,
+        var transaction = backend.prepareTransaction(previous,
                 state(access("alice", "user", Map.of("type", "artifact", "id", TARGET), "write")));
         client.failNextCreatePermission();
         assertThrows(BackendOperationException.class, transaction::apply);

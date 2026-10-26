@@ -8,8 +8,9 @@ definitions when compiling PACT `Access` objects. Compilation has no
 service-type-specific Ozone or Trino branches.
 
 The backend id identifies the service block used in PACT state (and in
-`DataAccess.spec.resources`); it should match the Ranger ServiceDef type
-returned for the configured Ranger service. Configure one backend per Ranger
+`DataAccess.spec.resources`); it is an arbitrary instance name and need not
+match the Ranger ServiceDef type. PACT discovers the type from the configured
+Ranger service. Configure one backend per Ranger
 service instance. By default, PACT treats every policy in the configured
 service as part of its authoritative state: policies absent from desired state
 are deleted, and a same-name policy may be updated to match PACT's desired
@@ -92,8 +93,8 @@ and are checked against `recursiveSupported`.
 The Ranger backend/compiler and Kubernetes DataAccess compiler do not have an
 Ozone/Trino/Kafka service allow-list. A new Ranger service can be used by
 configuring a backend whose id matches the service block name in
-`spec.resources`, and setting the name of an existing Ranger service whose
-type matches that id. Resource names, parents, and permissions are resolved
+`spec.resources`, and setting the name of an existing Ranger service.
+Resource names, parents, and permissions are resolved
 through its ServiceDef. The special `registry` service block remains reserved
 for Artifact Keeper.
 
@@ -111,11 +112,11 @@ ServiceDef also exposes `read_acl`, `write_acl`, and `assume_role`. The generic
 DataAccess compiler intentionally does not impose those old service-specific
 enums; values are checked against the configured service's ServiceDef.
 
-Policy names are deterministic, and state changes use a prepared snapshot so a
-failed multi-backend reconciliation can compensate Ranger changes. With the
-default mode, the snapshot and reconciliation include every policy returned for
-the configured service. With `managed-only: "true"`, only policies with the
-`managed` label are included.
+Policy names are deterministic. Prepared transactions compile both previous
+and desired declarations; rollback uses the normal synchronizer to reapply the
+previous declaration, rather than restoring manual policy drift. The default
+scope includes every policy returned for the configured service. With
+`managed-only: "true"`, only policies with the `managed` label participate.
 
 Before creating or updating desired policies, PACT ensures every user referenced
 by their allow, deny, data-mask, or row-filter items exists in Ranger. It uses
@@ -125,11 +126,31 @@ matching legacy behavior. The password is not persisted or logged; these users
 are only principals in Ranger policies and do not need to authenticate to
 Ranger.
 
+Explicit identities fail with a checked not-implemented validation error
+before policy writes. This is separate from the access-driven Ranger user
+ensure behavior above.
+
 The Ranger service account needs permission to read the configured service,
 ServiceDefs, policies, and Ranger users, and to create users and policies and
 to update/delete policies for the configured service.
 
 ## Integration tests
+
+Policy catalog reads check all supported envelopes, duplicate IDs, changing
+totals and premature termination. A short page with a larger advertised total
+does not terminate the read. Failed/incomplete reads stop before mutations.
+PACT verifies policy/API behavior; enforcement inside HDFS/Ozone/Trino/Kafka is
+Ranger's responsibility. See [DIAGNOSTICS.md](../DIAGNOSTICS.md) for logging.
+
+Unknown configuration keys now fail initialization. Use `service-name` to select
+the service; its type is read from Ranger, so a stale `service-type` key should
+be removed rather than retained as an ignored setting.
+
+See the [shared test contract and coverage map](../TESTING.md) for unit coverage,
+including pagination, lost-write-response compensation and safe error handling.
+Adapter errors retain HTTP status, operation and sanitized server/parser details.
+Passwords and authentication material are masked; users, resources and policies
+remain available for diagnosis.
 
 With `-Dpact.integration=true`, `RangerLiveIntegrationTest` exercises HDFS,
 Ozone, Trino, and Kafka ServiceDefs through a live Ranger API. The Ozone test

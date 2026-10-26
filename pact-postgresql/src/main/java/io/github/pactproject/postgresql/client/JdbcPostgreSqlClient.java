@@ -33,6 +33,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class JdbcPostgreSqlClient implements PostgreSqlClient {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(JdbcPostgreSqlClient.class);
     private static final Pattern JDBC_URL = Pattern.compile(
             "^(jdbc:postgresql:(?://[^/?]*)?)(?:/?([^?]*))?(\\?.*)?$"
     );
@@ -347,6 +348,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             try (Connection connection = connect(database)) {
                 verifyAuthoritativeSuperuser(connection);
                 connection.setAutoCommit(false);
+                log.debug("database={} phase=database_sync result=started", database);
                 try {
                     synchronizeDatabase(
                             connection,
@@ -357,8 +359,10 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                             overrides
                     );
                     connection.commit();
+                    log.debug("database={} phase=database_sync result=committed", database);
                 }
                 catch (SQLException | RuntimeException e) {
+                    log.debug("database={} action=rollback result=attempted error_type={}", database, e.getClass().getSimpleName());
                     rollback(connection, e);
                     throw e;
                 }
@@ -562,9 +566,10 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                         "SET LOCAL ROLE " + quoteIdentifier(grantor)
                 );
             }
-            statement.execute(defaultPrivilegeStatement(
-                    operation, grant, grantOptionOnly
-            ));
+            String sql = defaultPrivilegeStatement(operation, grant, grantOptionOnly);
+            log.debug("database={} action=default_privilege result=started grant={} sql={}", grant.scope().database(), grant, sql);
+            statement.execute(sql);
+            log.debug("database={} action=default_privilege result=executed grant={}", grant.scope().database(), grant);
             if (grantor != null) {
                 statement.execute("SET LOCAL ROLE NONE");
             }
@@ -598,8 +603,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     )     throws SQLException {
     Set<AclGrant> actual = loadAclGrants(connection, database);
     List<AclGrant> revocations = actual.stream()
-            .filter(acl -> !acl.granteeIsOwner()
-                    && !isPreservedDefaultPublicAcl(acl))
+            .filter(acl -> !acl.granteeIsOwner())
             .filter(acl -> !wanted.contains(acl.grant())
                     || acl.grantable())
             .sorted(java.util.Comparator
@@ -635,7 +639,6 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         stale.removeAll(wanted);
         long grantOptions = finalAcl.stream()
                 .filter(acl -> !acl.granteeIsOwner()
-                        && !isPreservedDefaultPublicAcl(acl)
                         && acl.grantable())
                 .count();
         if (!missing.isEmpty() || !stale.isEmpty() || grantOptions > 0) {
@@ -687,8 +690,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     private Set<Grant> authoritativeManagedGrants(Set<AclGrant> aclGrants) {
         Set<Grant> result = new HashSet<>();
         for (AclGrant acl : aclGrants) {
-            if (!acl.granteeIsOwner()
-                    && !isPreservedDefaultPublicAcl(acl)) {
+            if (!acl.granteeIsOwner()) {
                 result.add(acl.grant());
             }
         }
@@ -841,7 +843,10 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             String operation
     ) throws SQLException {
         try (Statement statement = connection.createStatement()) {
+            // Identity SQL can contain a password: log only the operation and role.
+            log.debug("action=identity_ddl result=started principal={} operation={}", role, operation);
             statement.execute(sql);
+            log.debug("action=identity_ddl result=executed principal={} operation={}", role, operation);
         }
         catch (SQLException e) {
             throw new SQLException(
@@ -881,8 +886,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             Grant grant = acl.grant();
             if (config.reconciliationMode()
                     == PostgreSqlReconciliationMode.AUTHORITATIVE) {
-                if (!acl.granteeIsOwner()
-                        && !isPreservedDefaultPublicAcl(acl)) {
+                if (!acl.granteeIsOwner()) {
                     result.add(grant);
                 }
                 continue;
@@ -1146,23 +1150,6 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         }
     }
 
-    private boolean isPreservedDefaultPublicAcl(AclGrant acl) {
-        if (!config.preserveDefaultPublicPrivileges()
-                || !acl.grantorIsOwner()
-                || acl.grantable()
-                || !"PUBLIC".equals(acl.grant().role())) {
-            return false;
-        }
-        Grant grant = acl.grant();
-        return switch (grant.target().level()) {
-            case DATABASE -> grant.privilege() == Privilege.CONNECT
-                    || grant.privilege() == Privilege.TEMPORARY;
-            case FUNCTION, PROCEDURE ->
-                    grant.privilege() == Privilege.EXECUTE;
-            default -> false;
-        };
-    }
-
     private Set<Grant> expand(
             Connection connection,
             String database,
@@ -1377,7 +1364,10 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     private void execute(Connection connection, String operation, Grant grant)
             throws SQLException {
         try (Statement statement = connection.createStatement()) {
-            statement.execute(statement(operation, grant));
+            String sql = statement(operation, grant);
+            log.debug("database={} action={} result=started grant={} sql={}", grant.database(), operation, grant, sql);
+            statement.execute(sql);
+            log.debug("database={} action={} result=executed grant={}", grant.database(), operation, grant);
         }
     }
 

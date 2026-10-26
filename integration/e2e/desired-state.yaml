@@ -25,3 +25,12 @@ accesses:
       permissions:
         database:
           - CONNECT
+  # PactE2E.java replaces these fixture markers before the filesystem provider reads YAML.
+  - principal: __ES_USER__
+    resource:
+      backendId: pact-it-search
+      target:
+        index: __ES_INDEX__
+    attributes:
+      permissions:
+        indices: [__ES_PRIVILEGES__]

@@ -23,3 +23,10 @@ backends:
       jdbc-url: jdbc:postgresql://pact-postgres:5432/postgres
       username: ${PACT_POSTGRES_USER}
       password: ${PACT_POSTGRES_PASSWORD}
+  - id: pact-it-search
+    type: elasticsearch
+    config:
+      endpoint: ${PACT_IT_ELASTICSEARCH_ENDPOINT}
+      username: ${PACT_IT_ELASTICSEARCH_USERNAME}
+      password: ${PACT_IT_ELASTICSEARCH_PASSWORD}
+      reconciliation-mode: authoritative

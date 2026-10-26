@@ -68,6 +68,7 @@ public final class DataAccessCompiler
                 if (!(key instanceof String field)
                         || !Set.of(
                                 "backend",
+                                "backends",
                                 "name",
                                 "ensure",
                                 "passwordSecretRef"
@@ -78,10 +79,10 @@ public final class DataAccessCompiler
                 }
             }
 
-            String backendId = requiredString(declaration, "backend");
+            Set<String> backendIds = identityBackends(declaration);
             String principal = requiredString(declaration, "name");
-            Object ensureValue = declaration.get("ensure");
-            if (ensureValue != null && !(ensureValue instanceof Boolean)) {
+            Object ensureValue = declaration.containsKey("ensure") ? declaration.get("ensure") : Boolean.TRUE;
+            if (!(ensureValue instanceof Boolean)) {
                 throw invalid(
                         "DataAccess identity.ensure must be a boolean"
                 );
@@ -90,25 +91,47 @@ public final class DataAccessCompiler
             String source = passwordSource(
                     declaration.get("passwordSecretRef")
             );
-            Identity identity = new Identity(
-                    backendId,
-                    principal,
-                    ensure,
-                    source,
-                    null,
-                    null
-            );
-            String key = backendId + "\u0000" + principal;
-            Identity previous = result.putIfAbsent(key, identity);
-            if (previous != null && !previous.equals(identity)) {
-                throw invalid(
-                        "Conflicting identity declarations for backend '"
-                                + backendId + "' and principal '"
-                                + principal + "'"
+            for (String backendId : backendIds) {
+                Identity identity = new Identity(
+                        backendId,
+                        principal,
+                        ensure,
+                        source,
+                        null,
+                        null
                 );
+                String key = backendId + "\u0000" + principal;
+                Identity previous = result.putIfAbsent(key, identity);
+                if (previous != null && !previous.equals(identity)) {
+                    throw invalid(
+                            "Conflicting identity declarations for backend '"
+                                    + backendId + "' and principal '"
+                                    + principal + "'"
+                    );
+                }
             }
         }
         return Set.copyOf(result.values());
+    }
+
+    private Set<String> identityBackends(Map<?, ?> declaration) {
+        if (declaration.containsKey("backend") == declaration.containsKey("backends")) {
+            throw invalid("DataAccess identity must contain exactly one of backend or backends");
+        }
+        if (declaration.containsKey("backend")) {
+            return Set.of(requiredString(declaration, "backend"));
+        }
+        if (!(declaration.get("backends") instanceof List<?> backends) || backends.isEmpty()) {
+            throw invalid("DataAccess identity.backends must be a non-empty array of backend IDs");
+        }
+        Set<String> result = new LinkedHashSet<>();
+        for (Object value : backends) {
+            if (!(value instanceof String backendId) || backendId.isBlank()) {
+                throw invalid("DataAccess identity.backends must contain non-empty backend IDs");
+            }
+            result.add(backendId);
+        }
+        return Set.copyOf(result);
     }
 
     private String passwordSource(Object value)

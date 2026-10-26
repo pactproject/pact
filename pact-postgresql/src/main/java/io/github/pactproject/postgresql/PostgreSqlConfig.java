@@ -7,16 +7,14 @@ public record PostgreSqlConfig(
         String jdbcUrl,
         String username,
         String password,
-        PostgreSqlReconciliationMode reconciliationMode,
-        boolean preserveDefaultPublicPrivileges
+        PostgreSqlReconciliationMode reconciliationMode
 ) {
     private static final Set<String> SUPPORTED_KEYS =
             Set.of(
                     "jdbc-url",
                     "username",
                     "password",
-                    "reconciliation-mode",
-                    "preserve-default-public-privileges"
+                    "reconciliation-mode"
             );
 
     public PostgreSqlConfig {
@@ -44,8 +42,7 @@ public record PostgreSqlConfig(
                 jdbcUrl,
                 username,
                 password,
-                PostgreSqlReconciliationMode.GRANTOR,
-                true
+                PostgreSqlReconciliationMode.AUTHORITATIVE
         );
     }
 
@@ -61,32 +58,14 @@ public record PostgreSqlConfig(
                 config.get("jdbc-url"),
                 config.get("username"),
                 config.get("password"),
-                parseMode(config.get("reconciliation-mode")),
-                parsePreserveDefaultPublicPrivileges(
-                        config.get("preserve-default-public-privileges")
-                )
+                parseMode(config.get("reconciliation-mode"))
         );
     }
 
     private static PostgreSqlReconciliationMode parseMode(String value) {
         return value == null || value.isBlank()
-                ? PostgreSqlReconciliationMode.GRANTOR
+                ? PostgreSqlReconciliationMode.AUTHORITATIVE
                 : PostgreSqlReconciliationMode.parse(value);
-    }
-
-    private static boolean parsePreserveDefaultPublicPrivileges(String value) {
-        if (value == null || value.isBlank()) {
-            return true;
-        }
-        if ("true".equalsIgnoreCase(value)) {
-            return true;
-        }
-        if ("false".equalsIgnoreCase(value)) {
-            return false;
-        }
-        throw new IllegalArgumentException(
-                "PostgreSQL preserve-default-public-privileges must be true or false"
-        );
     }
 
     private static void requireValue(String value, String key) {
@@ -95,5 +74,10 @@ public record PostgreSqlConfig(
                     "Missing required PostgreSQL config: " + key
             );
         }
+    }
+
+    @Override public String toString() {
+        return "PostgreSqlConfig[jdbcUrl=" + io.github.pactproject.api.DiagnosticSanitizer.redact(jdbcUrl, password)
+                + ", username=" + username + ", password=[REDACTED], reconciliationMode=" + reconciliationMode + "]";
     }
 }

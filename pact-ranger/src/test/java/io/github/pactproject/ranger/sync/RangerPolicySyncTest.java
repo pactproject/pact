@@ -39,15 +39,10 @@ class RangerPolicySyncTest {
         assertEquals(1, client.created);
         assertEquals(2, client.deleted);
         assertEquals(List.of("alice"), client.ensuredUsers);
-        assertEquals(
-                List.of(
-                        "ensure:alice",
-                        "create:new-managed",
-                        "delete:2",
-                        "delete:1"
-                ),
-                client.operations
-        );
+        assertEquals(List.of("ensure:alice", "create:new-managed"),
+                client.operations.subList(0, 2));
+        assertEquals(java.util.Set.of("delete:1", "delete:2"),
+                new java.util.HashSet<>(client.operations.subList(2, client.operations.size())));
 
         List<JsonNode> current = sync.getPolicies();
         sync.synchronize(current, List.of(desired));

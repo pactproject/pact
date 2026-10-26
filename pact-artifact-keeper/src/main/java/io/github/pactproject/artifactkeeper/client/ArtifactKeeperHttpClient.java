@@ -21,7 +21,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -34,21 +33,20 @@ public final class ArtifactKeeperHttpClient
         implements ArtifactKeeperClient {
 
     private static final int DEFAULT_PER_PAGE = 100;
-    private static final int MAX_RATE_LIMIT_RETRIES = 3;
-    private static final long DEFAULT_RATE_LIMIT_DELAY_MILLIS = 1000;
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final URI baseUri;
     private final String token;
     private final int perPage;
+    private final RateLimitPolicy rateLimit;
 
     public ArtifactKeeperHttpClient(
             String baseUrl,
             String token
     ) {
         this(
-                HttpClient.newHttpClient(),
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(),
                 new ObjectMapper(),
                 baseUrl,
                 token,
@@ -74,6 +72,11 @@ public final class ArtifactKeeperHttpClient
             int perPage,
             ArtifactKeeperApiProfile apiProfile
     ) {
+        this(httpClient, objectMapper, baseUrl, token, perPage, apiProfile, new RateLimitPolicy());
+    }
+
+    ArtifactKeeperHttpClient(HttpClient httpClient, ObjectMapper objectMapper, String baseUrl, String token,
+            int perPage, ArtifactKeeperApiProfile apiProfile, RateLimitPolicy rateLimit) {
         if (perPage <= 0) {
             throw new IllegalArgumentException(
                     "perPage must be greater than zero"
@@ -89,12 +92,13 @@ public final class ArtifactKeeperHttpClient
         );
         this.token = token;
         this.perPage = perPage;
+        this.rateLimit = Objects.requireNonNull(rateLimit);
         Objects.requireNonNull(apiProfile);
     }
 
     public ArtifactKeeperHttpClient(ArtifactKeeperConfig artifactKeeperConfig) {
         this(
-                HttpClient.newHttpClient(),
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(),
                 new ObjectMapper(),
                 artifactKeeperConfig.url().toString(),
                 artifactKeeperConfig.token(),
@@ -142,8 +146,20 @@ public final class ArtifactKeeperHttpClient
             throw new ArtifactKeeperClientException("Artifact Keeper project list is missing an 'items' array");
         }
         List<ArtifactKeeperApiNamedObject> projects = new ArrayList<>();
+        var seen = new HashSet<String>();
         for (JsonNode node : response.path("items")) {
+            if (!seen.add(text(node, "id"))) throw new ArtifactKeeperClientException("Duplicate Artifact Keeper project ID in catalog");
             projects.add(new ArtifactKeeperApiNamedObject(text(node, "id"), text(node, "key"), text(node, "name")));
+        }
+        var pagination = response.path("pagination");
+        var pages = pagination.path("total_pages");
+        if ((!pagination.isMissingNode() && !pagination.isObject())
+                || (!pages.isMissingNode() && (!pages.isIntegralNumber() || !pages.canConvertToInt()
+                || pages.asInt() < 0 || pages.asInt() > 1 || (pages.asInt() == 0 && !projects.isEmpty())))
+                || (pagination.has("total") && (!pagination.path("total").isIntegralNumber()
+                || !pagination.path("total").canConvertToLong()
+                || pagination.path("total").asLong() != projects.size()))) {
+            throw new ArtifactKeeperClientException("Artifact Keeper returned an incomplete unpaged project catalog");
         }
         return List.copyOf(projects);
     }
@@ -280,6 +296,9 @@ public final class ArtifactKeeperHttpClient
             NodeMapper<T> mapper
     ) throws ArtifactKeeperClientException {
         List<T> result = new ArrayList<>();
+        Set<String> seenIds = new HashSet<>();
+        Integer expectedPages = null;
+        Long expectedTotal = null;
 
         for (int page = 1; ; page++) {
             JsonNode response = request(
@@ -308,6 +327,10 @@ public final class ArtifactKeeperHttpClient
             }
 
             for (JsonNode item : items) {
+                String itemId = text(item, "id");
+                if (itemId.isBlank() || !seenIds.add(itemId)) {
+                    throw new ArtifactKeeperClientException("Artifact Keeper repeated a catalog ID at " + path + " page " + page);
+                }
                 result.add(mapper.map(item));
             }
 
@@ -316,14 +339,32 @@ public final class ArtifactKeeperHttpClient
                     .path("total_pages")
                     .asInt(-1);
 
-            if (totalPages < 0) {
+            if (totalPages < 0 || !response.path("pagination").path("total_pages").isIntegralNumber()
+                    || !response.path("pagination").path("total_pages").canConvertToInt()) {
                 throw new ArtifactKeeperClientException(
                         "Artifact Keeper API response does not contain " +
                                 "'pagination.total_pages'"
                 );
             }
 
+            JsonNode totalNode = response.path("pagination").path("total");
+            Long total = totalNode.isMissingNode() ? null : totalNode.asLong(-1);
+            if (total != null && (!totalNode.isIntegralNumber() || !totalNode.canConvertToLong() || total < 0)) {
+                throw new ArtifactKeeperClientException("Artifact Keeper catalog has invalid total: " + path);
+            }
+            if (page == 1) { expectedPages = totalPages; expectedTotal = total; }
+            else if (totalPages != expectedPages || !Objects.equals(total, expectedTotal)) {
+                throw new ArtifactKeeperClientException("Artifact Keeper catalog pagination changed during read: " + path);
+            }
+            if ((totalPages == 0 && !items.isEmpty()) || (page < totalPages && items.isEmpty())
+                    || (total != null && result.size() > total)) {
+                throw new ArtifactKeeperClientException("Artifact Keeper catalog is incomplete or inconsistent: " + path);
+            }
+
             if (page >= totalPages) {
+                if (expectedTotal != null && result.size() != expectedTotal) {
+                    throw new ArtifactKeeperClientException("Artifact Keeper catalog total does not match loaded items: " + path);
+                }
                 return List.copyOf(result);
             }
         }
@@ -442,16 +483,15 @@ public final class ArtifactKeeperHttpClient
         );
 
         String text = response.body();
+        String[] secrets = {token, body == null ? null : body.path("password").asText(null)};
 
         if (response.statusCode() < 200
                 || response.statusCode() >= 300) {
 
             throw new ArtifactKeeperClientException(
-                    "Artifact Keeper API request failed (" +
-                            response.statusCode() + " " +
-                            response.version() + ") " +
-                            uri + ": " +
-                            parseErrorBody(text)
+                    "Artifact Keeper API " + method + " " + path
+                            + " returned HTTP " + response.statusCode() + ": "
+                            + io.github.pactproject.api.DiagnosticSanitizer.redact(text, secrets)
             );
         }
 
@@ -465,9 +505,8 @@ public final class ArtifactKeeperHttpClient
         } catch (JsonProcessingException e) {
             throw new ArtifactKeeperClientException(
                     "Artifact Keeper API returned invalid JSON " +
-                            "(" + response.statusCode() + ") " +
-                            uri + ": " + text,
-                    e
+                            "(" + response.statusCode() + ") " + method + " " + path + ": "
+                            + io.github.pactproject.api.DiagnosticSanitizer.redact(e.getMessage(), secrets)
             );
         }
     }
@@ -475,26 +514,28 @@ public final class ArtifactKeeperHttpClient
     private HttpResponse<String> sendWithRateLimitRetry(
             HttpRequest request
     ) throws ArtifactKeeperClientException {
+        long started = rateLimit.start();
         for (int attempt = 0; ; attempt++) {
             try {
                 HttpResponse<String> response =
                         httpClient.send(
-                                request,
+                                HttpRequest.newBuilder(request, (name, value) -> true)
+                                        .timeout(rateLimit.remaining(started)).build(),
                                 HttpResponse.BodyHandlers.ofString()
                         );
 
                 if (response.statusCode() != 429
-                        || attempt >= MAX_RATE_LIMIT_RETRIES) {
+                        || attempt >= RateLimitPolicy.MAX_RETRIES) {
                     return response;
                 }
 
-                sleep(getRateLimitDelay(response));
+                rateLimit.pause(started, rateLimit.delayMillis(response.headers()));
 
             } catch (IOException e) {
                 throw new ArtifactKeeperClientException(
-                        "Artifact Keeper API request failed: "
-                                + request.uri(),
-                        e
+                        "Artifact Keeper API request failed: " + request.uri() + ": "
+                                + e.getClass().getSimpleName() + ": "
+                                + io.github.pactproject.api.DiagnosticSanitizer.redact(e.getMessage(), token)
                 );
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -506,62 +547,6 @@ public final class ArtifactKeeperHttpClient
                 );
             }
         }
-    }
-
-    private long getRateLimitDelay(
-            HttpResponse<?> response
-    ) {
-        String retryAfter =
-                response.headers()
-                        .firstValue("Retry-After")
-                        .orElse(null);
-
-        if (retryAfter != null) {
-            try {
-                long seconds = Long.parseLong(retryAfter);
-
-                return Math.max(
-                        0,
-                        seconds * 1000
-                );
-            } catch (NumberFormatException ignored) {
-                try {
-                    Instant retryAt =
-                            Instant.parse(retryAfter);
-
-                    return Math.max(
-                            0,
-                            Duration.between(
-                                    Instant.now(),
-                                    retryAt
-                            ).toMillis()
-                    );
-                } catch (Exception ignoredAgain) {
-                    // fall through
-                }
-            }
-        }
-
-        String reset =
-                response.headers()
-                        .firstValue("X-RateLimit-Reset")
-                        .orElse(null);
-
-        if (reset != null) {
-            try {
-                long epochSeconds = Long.parseLong(reset);
-
-                return Math.max(
-                        0,
-                        epochSeconds * 1000
-                                - System.currentTimeMillis()
-                );
-            } catch (NumberFormatException ignored) {
-                // fall through
-            }
-        }
-
-        return DEFAULT_RATE_LIMIT_DELAY_MILLIS;
     }
 
     private URI buildUri(
@@ -590,29 +575,8 @@ public final class ArtifactKeeperHttpClient
             return objectMapper.writeValueAsString(body);
         } catch (JsonProcessingException e) {
             throw new ArtifactKeeperClientException(
-                    "Failed to serialize Artifact Keeper API request",
-                    e
+                    "Failed to serialize Artifact Keeper API request"
             );
-        }
-    }
-
-    private String parseErrorBody(String body) {
-        if (body == null || body.isEmpty()) {
-            return "<empty response body>";
-        }
-
-        try {
-            JsonNode node = objectMapper.readTree(body);
-
-            JsonNode message = node.get("message");
-
-            if (message != null && message.isTextual()) {
-                return message.asText();
-            }
-
-            return node.toString();
-        } catch (JsonProcessingException e) {
-            return body;
         }
     }
 
@@ -637,19 +601,6 @@ public final class ArtifactKeeperHttpClient
                 value,
                 StandardCharsets.UTF_8
         );
-    }
-
-    private static void sleep(long millis) throws ArtifactKeeperClientException {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-
-            throw new ArtifactKeeperClientException(
-                    "Interrupted while waiting for Artifact Keeper rate limit",
-                    e
-            );
-        }
     }
 
     @FunctionalInterface

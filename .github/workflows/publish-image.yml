@@ -37,6 +37,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Validate release number and deployed versions
+        run: python3 integration/scripts/check-release.py "${GITHUB_REF_NAME#image-v}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -53,7 +56,7 @@ jobs:
         with:
           images: ghcr.io/pactproject/pact
           tags: |
-            type=match,pattern=image-v(.*),group=1
+            type=match,pattern=^image-v([1-9][0-9]*)$,group=1
             type=sha,prefix=sha-
 
       - name: Build and publish image

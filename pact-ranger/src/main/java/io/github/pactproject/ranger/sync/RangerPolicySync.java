@@ -17,6 +17,7 @@ import java.util.Set;
 import java.util.TreeMap;
 
 public final class RangerPolicySync {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(RangerPolicySync.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final List<String> SEMANTIC_FIELDS = List.of(
             "name",
@@ -42,25 +43,22 @@ public final class RangerPolicySync {
     private final String serviceName;
     private final int pageSize;
     private final boolean managedOnly;
+    private final String backendId;
 
-    public RangerPolicySync(
-            RangerClient client,
-            String serviceName,
-            int pageSize
-    ) {
+    public RangerPolicySync(RangerClient client, String serviceName, int pageSize) {
         this(client, serviceName, pageSize, false);
     }
 
-    public RangerPolicySync(
-            RangerClient client,
-            String serviceName,
-            int pageSize,
-            boolean managedOnly
-    ) {
+    public RangerPolicySync(RangerClient client, String serviceName, int pageSize, boolean managedOnly) {
+        this(client, serviceName, pageSize, managedOnly, serviceName);
+    }
+
+    public RangerPolicySync(RangerClient client, String serviceName, int pageSize, boolean managedOnly, String backendId) {
         this.client = client;
         this.serviceName = serviceName;
         this.pageSize = pageSize;
         this.managedOnly = managedOnly;
+        this.backendId = backendId;
     }
 
     public List<JsonNode> getPolicies()
@@ -122,21 +120,36 @@ public final class RangerPolicySync {
             collectUsers(update.policy(), users);
         }
         for (String user : users) {
+            log.debug("backend={} service={} action=ensure_user result=started principal={}", backendId, serviceName, user);
             client.ensureUser(user);
+            log.debug("backend={} service={} action=ensure_user result=completed principal={}", backendId, serviceName, user);
         }
 
+        log.info("backend={} service={} phase=diff planned_create={} planned_update={} planned_delete={}",
+                backendId, serviceName, creates.size(), updates.size(), deletes.size());
         for (JsonNode create : creates) {
+            operation("create_policy", "started", create);
             client.createPolicy(asObject(stripServerFields(create)));
+            operation("create_policy", "completed", create);
         }
         for (Update update : updates) {
+            operation("update_policy", "started", update.policy());
             client.updatePolicy(
                     update.id(),
                     asObject(stripServerFields(update.policy()))
             );
+            operation("update_policy", "completed", update.policy());
         }
         for (JsonNode delete : deletes) {
+            operation("delete_policy", "started", delete);
             client.deletePolicy(requiredId(delete));
+            operation("delete_policy", "completed", delete);
         }
+    }
+
+    private void operation(String action, String result, JsonNode policy) {
+        if (log.isDebugEnabled()) log.debug("backend={} service={} action={} result={} policy={}", backendId, serviceName,
+                action, result, io.github.pactproject.api.DiagnosticSanitizer.redact(policy.toString()));
     }
 
     private void rejectUnmanagedNameCollisions(

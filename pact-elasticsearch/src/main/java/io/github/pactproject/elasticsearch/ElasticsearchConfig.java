@@ -8,9 +8,12 @@ public record ElasticsearchConfig(
         String username,
         String password,
         String apiKey,
-        String principalMode
+        String principalMode,
+        ElasticsearchReconciliationMode reconciliationMode,
+        java.nio.file.Path caCertificate
 ) {
     public ElasticsearchConfig {
+        java.util.Objects.requireNonNull(reconciliationMode, "Elasticsearch reconciliation mode is required");
         if (endpoint == null || !endpoint.isAbsolute()
                 || !("http".equalsIgnoreCase(endpoint.getScheme())
                 || "https".equalsIgnoreCase(endpoint.getScheme()))
@@ -26,6 +29,9 @@ public record ElasticsearchConfig(
                 && password != null && !password.isBlank();
         boolean anyBasic = username != null || password != null;
         boolean key = apiKey != null && !apiKey.isBlank();
+        if (apiKey != null && apiKey.isBlank()) {
+            throw new IllegalArgumentException("Elasticsearch api-key must not be blank");
+        }
         if (anyBasic && !basic) {
             throw new IllegalArgumentException(
                     "Elasticsearch username and password must be supplied together"
@@ -42,9 +48,20 @@ public record ElasticsearchConfig(
                     "Elasticsearch principal-mode must be require or ensure"
             );
         }
+        if (caCertificate != null && !"https".equalsIgnoreCase(endpoint.getScheme())) {
+            throw new IllegalArgumentException("Elasticsearch ca-certificate requires an HTTPS endpoint");
+        }
+    }
+
+    public ElasticsearchConfig(URI endpoint, String username, String password, String apiKey, String principalMode) {
+        this(endpoint, username, password, apiKey, principalMode, ElasticsearchReconciliationMode.AUTHORITATIVE, null);
     }
 
     public static ElasticsearchConfig from(Map<String, String> values) {
+        var unsupported = new java.util.HashSet<>(values.keySet());
+        unsupported.removeAll(java.util.Set.of("endpoint", "username", "password", "api-key", "principal-mode",
+                "reconciliation-mode", "ca-certificate"));
+        if (!unsupported.isEmpty()) throw new IllegalArgumentException("Unsupported Elasticsearch config key(s): " + unsupported);
         String endpoint = require(values, "endpoint");
         String mode = values.getOrDefault("principal-mode", "require");
         return new ElasticsearchConfig(
@@ -52,7 +69,10 @@ public record ElasticsearchConfig(
                 values.get("username"),
                 values.get("password"),
                 values.get("api-key"),
-                mode
+                mode,
+                ElasticsearchReconciliationMode.parse(values.getOrDefault("reconciliation-mode", "authoritative")),
+                values.containsKey("ca-certificate")
+                        ? java.nio.file.Path.of(require(values, "ca-certificate")) : null
         );
     }
 
@@ -71,6 +91,6 @@ public record ElasticsearchConfig(
         return "ElasticsearchConfig[endpoint=" + endpoint
                 + ", username=" + username
                 + ", authentication=[REDACTED], principalMode="
-                + principalMode + "]";
+                + principalMode + ", reconciliationMode=" + reconciliationMode + ", caCertificate=" + caCertificate + "]";
     }
 }

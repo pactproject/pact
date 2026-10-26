@@ -15,13 +15,12 @@ helm upgrade --install pact .\charts\pact `
   --namespace pact-system `
   --create-namespace `
   --set image.repository=registry.example/pact `
-  --set image.tag=1.0.0 `
+  --set image.tag=8 `
   --values .\pact-values.yaml
 ```
 
-The chart's default image is `pact:latest`, suitable for local clusters where
-that image has been loaded. Set a repository and version explicitly for
-production.
+The chart's default image is `ghcr.io/pactproject/pact:8`. Set a repository
+and version explicitly for the features required by your deployment.
 
 The chart installs a `DataAccess` CRD by default. Set `crd.create: false` when
 the CRD is managed separately. The CRD group, version, plural, and singular are
@@ -73,6 +72,37 @@ parsing the YAML configuration. Keep passwords out of Helm values and the
 generated ConfigMap; inject them from Kubernetes Secrets using `extraEnv`.
 Unset references cause configuration loading to fail. Environment substitution
 is a PACT config-file feature and applies to all string values.
+
+## Backend CA certificates and init containers
+
+Use `extraVolumes` and `extraVolumeMounts` to mount an existing ConfigMap or
+Secret containing a CA bundle. Elasticsearch's `ca-certificate` points to the
+mounted PEM file; it configures only that backend client and preserves
+hostname verification. A complete values example is
+[`examples/elasticsearch-ca.yaml`](examples/elasticsearch-ca.yaml):
+
+```yaml
+extraVolumes:
+  - name: elasticsearch-ca
+    configMap:
+      name: elasticsearch-ca
+extraVolumeMounts:
+  - name: elasticsearch-ca
+    mountPath: /etc/pact-ca/elasticsearch
+    readOnly: true
+```
+
+Set the backend's `ca-certificate: /etc/pact-ca/elasticsearch/ca.crt` and create
+the ConfigMap with a `ca.crt` key. CA rotation is picked up when the controller
+restarts; changing a referenced ConfigMap alone does not recreate clients.
+
+`extraInitContainers` accepts ordinary Kubernetes container definitions. It can
+prepare a shared JVM truststore on an `emptyDir` mounted with `extraVolumes`;
+mount the result into PACT and set `JAVA_TOOL_OPTIONS` via `extraEnv` with the
+appropriate `javax.net.ssl.trustStore` arguments. Configure volume permissions
+and init-container security settings for UID/GID 10001. This changes JVM-wide
+trust and is useful for clients using default JVM TLS configuration. The
+per-backend PEM option needs no init container or truststore password.
 
 ## Secret access for identities
 

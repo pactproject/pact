@@ -1,0 +1,25 @@
+pact:
+  backends:
+    - id: search
+      type: elasticsearch
+      config:
+        endpoint: https://elasticsearch.example:9200
+        username: pact
+        password: ${ES_PASSWORD}
+        ca-certificate: /etc/pact-ca/elasticsearch/ca.crt
+        principal-mode: ensure
+        reconciliation-mode: authoritative
+extraEnv:
+  - name: ES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: elasticsearch-credentials
+        key: password
+extraVolumes:
+  - name: elasticsearch-ca
+    configMap:
+      name: elasticsearch-ca
+extraVolumeMounts:
+  - name: elasticsearch-ca
+    mountPath: /etc/pact-ca/elasticsearch
+    readOnly: true

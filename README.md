@@ -35,6 +35,13 @@ transactions and attempts compensating rollback if an apply fails. This
 reduces partial changes, but cannot guarantee atomicity across independent
 external systems.
 
+Rollback restores the previous agreed declaration. If compensation itself
+fails, the next reconciliation applies the current source declaration, even
+when it equals the previously agreed state or is empty, and includes all
+possibly affected scopes in cleanup. This recovery context currently exists
+only in core memory and is lost on restart. Ordinary unchanged backend states
+are still skipped; PACT does not periodically repair external drift.
+
 ## Design principles
 
 ### Declarative reconciliation, not another source of truth
@@ -92,10 +99,13 @@ provide them through the deployment's secret/configuration mechanism.
 | `pact-ranger` | Compiles access into managed policies for a configured Apache Ranger service |
 | `pact-artifact-keeper` | Reconciles Artifact Keeper permissions for all target types ([scope and compatibility](pact-artifact-keeper/README.md)) |
 | `pact-postgresql` | Reconciles PostgreSQL object privileges and declared role identities |
-| `pact-elasticsearch` | Reconciles Elasticsearch 9 native users' index privileges through PACT-owned roles |
+| `pact-elasticsearch` | Reconciles Elasticsearch 9 native users, index/cluster privileges and existing role assignments |
 
 Backend-specific configuration, supported access fields, permissions, and
 operational requirements belong in each module's README.
+
+For Elasticsearch DataAccess recipes and scope, see the
+[operator guide (Russian)](pact-elasticsearch/OPERATOR_GUIDE.ru.md).
 
 ## Configuration and execution
 
@@ -142,6 +152,22 @@ Run the application with the config path and plugins directory:
 pact-app <config> <plugins-directory>
 ```
 
+## Configuration migration
+
+PostgreSQL and Elasticsearch now default to `reconciliation-mode: authoritative`.
+Before upgrading, declare all grants/assignments required within their documented
+scope, or explicitly set PostgreSQL `grantor` / Elasticsearch `managed` to retain
+the previous ownership boundary. PostgreSQL authoritative mode requires
+superuser authority. Its removed `preserve-default-public-privileges` key is
+rejected; PUBLIC grants are ordinary ACLs and must be declared to retain them.
+
+Explicit Kubernetes identities default to `ensure: true`; set `false` to require
+an existing account. Use either `backend: id` or `backends: [id1, id2]`.
+Unsupported explicit identities fail validation instead of being ignored.
+See the module READMEs for scope, credentials and migration details. The plugin
+API method is now `prepareTransaction`; rebuild plugins overriding the old
+`prepare` method against this API.
+
 ## Docker image
 
 Build the image from the repository root so the Docker build can access the
@@ -159,12 +185,13 @@ secret mechanism rather than baking them into the image.
 
 GitHub Actions builds the image for pull requests and publishes it to GHCR
 when an image version tag is pushed. Prefix release tags with `image-v`; for
-example, to publish and pull image version `1.0.0`:
+example, to publish and pull release `8`:
 
 ```shell
-git tag image-v1.0.0
-git push origin image-v1.0.0
-docker pull ghcr.io/pactproject/pact:1.0.0
+python integration/scripts/check-release.py 8
+git tag image-v8
+git push origin image-v8
+docker pull ghcr.io/pactproject/pact:8
 ```
 
 GHCR package visibility is managed in GitHub; make the package public there if
@@ -177,22 +204,31 @@ and RBAC; see [`pact-kubernetes/README.md`](pact-kubernetes/README.md) and the
 
 ### Versioning
 
+PACT releases use one increasing positive integer, starting with `8` after
+the historical image `1.0.7`: `8`, `9`, `10`, and so on. This is a release
+sequence, not a semantic-version compatibility promise. Existing published tags
+remain unchanged.
+
 The root Maven version identifies the PACT API, core, and application. Each
 backend/state-provider plugin has its own version in that module's `pom.xml`;
 plugin versions may advance without changing the root application version. The
 plugins still depend on the API version declared by `pact.api.version` in the
 root POM.
 
-The container image has its own release version, selected by the `image-vX.Y.Z`
-Git tag and published as image tag `X.Y.Z` (plus a commit-SHA tag). Each image
-contains the plugin JARs built from that source revision. Updating a plugin
-therefore requires publishing a new image version, but does not require
-advancing the root Maven/application version. Plugin JARs are not published
+The container image uses the same release number as the root Maven/application
+and `pact.api.version`. Git tag `image-vN` publishes image tag `N` (plus a
+commit-SHA tag). Each image contains the plugin JARs built from that source
+revision. Updating a plugin
+therefore requires advancing the PACT release number. Plugin JARs are not published
 independently.
 
 The Helm chart package version in `charts/pact/Chart.yaml` tracks the chart
 itself. Its `appVersion` and the default `image.tag` in
 `charts/pact/values.yaml` should identify the image version the chart deploys.
+Keep these image values quoted so numeric release tags stay YAML strings. The
+chart package version remains independent SemVer, as required by Helm.
+Run `python integration/scripts/check-release.py N` before creating `image-vN`;
+the publishing workflow rejects non-integer or inconsistent release versions.
 
 ## Build
 
@@ -206,6 +242,17 @@ mvn test
 Live integration tests and their isolation requirements are described in
 [`INTEGRATION_TESTS.md`](INTEGRATION_TESTS.md).
 
+The shared backend test contract, links to concrete assertions and current
+coverage gaps are in [`TESTING.md`](TESTING.md). Check its inventory and
+references with `python integration/scripts/check-test-contract.py`.
+
+For diagnostics, readers of PACT logs are trusted as administrators of all
+configured backends. Users, resource names, ACLs, declarations and operational
+details may be logged. Passwords, API tokens/keys and Authorization values must
+be masked, including in response/error details and nested causes.
+
 The local Docker Compose backend and end-to-end test stack is documented there
 as well. Its E2E run exercises the filesystem provider and the Ranger,
-Artifact Keeper, and PostgreSQL backends against disposable services.
+Artifact Keeper, PostgreSQL and Elasticsearch backends against disposable services.
+Elasticsearch checks real read/write operations, privilege updates, an unrelated
+index boundary and empty-state revocation through the same application instance.

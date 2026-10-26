@@ -20,6 +20,83 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ArtifactKeeperBackendTest {
+    @Test
+    void ensuresOneAccountForMultiplePermissionsWithoutKeepingWorkingStateOnBackend() throws Exception {
+        var another = new ArtifactKeeperApiRepository("repo-b", "other-repository");
+        var client = client(List.of(), List.of(REPOSITORY, another), List.of());
+        var backend = new ArtifactKeeperBackend("ak", client);
+        var desired = state(access("svc-build", REPOSITORY.name(), Set.of("read")),
+                access("svc-build", another.name(), Set.of("read")));
+        backend.apply(desired);
+        assertEquals(1, client.createServiceAccountCalls());
+        assertEquals(2, client.getPermissions().size());
+        backend.prepareTransaction(PactState.empty(), PactState.empty(), Set.of(desired)).apply();
+        assertTrue(client.getPermissions().isEmpty());
+        backend.apply(desired);
+        assertEquals(1, client.createServiceAccountCalls(), "Each call reloads actual users rather than retaining an old snapshot");
+    }
+
+
+    @Test
+    void preparationResolvesAllReferencesBeforeAnyBackendWrites() {
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(REPOSITORY), List.of());
+        var writes = new java.util.concurrent.atomic.AtomicInteger();
+        var first = new io.github.pactproject.api.Backend() {
+            public String id() { return "a-first"; }
+            public void apply(PactState state) { writes.incrementAndGet(); }
+        };
+        var registry = new ArtifactKeeperBackend("z-registry", client);
+        var desired = new PactState(Set.of(
+                new Access("alice", new Resource("a-first", Map.of("table", "events")), Map.of()),
+                new Access("alice", new Resource("z-registry", Map.of("repository", "missing")),
+                        Map.of("actions", Value.set(Set.of(Value.string("read")))))
+        ));
+        var core = new io.github.pactproject.core.PactCore(List.of(registry, first));
+
+        assertThrows(io.github.pactproject.core.exception.ApplyException.class, () -> core.apply(desired));
+        assertEquals(0, writes.get());
+        assertEquals(0, client.createPermissionCalls());
+        assertEquals(0, client.deletePermissionCalls());
+        assertEquals(0, client.createServiceAccountCalls());
+    }
+
+    @Test
+    void preparationDoesNotEnsureAccountsAndApplyRechecksChangedReferences() throws Exception {
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(REPOSITORY), List.of());
+        var backend = new ArtifactKeeperBackend("registry", client);
+        var desired = new PactState(Set.of(new Access("svc-build",
+                new Resource("registry", Map.of("repository", REPOSITORY.name())),
+                Map.of("actions", Value.set(Set.of(Value.string("read")))))));
+        var transaction = backend.prepareTransaction(PactState.empty(), desired);
+        assertEquals(0, client.createServiceAccountCalls());
+        assertEquals(0, client.createPermissionCalls());
+        transaction.apply();
+        assertEquals(1, client.createServiceAccountCalls());
+        assertEquals(1, client.createPermissionCalls());
+
+        var namedGroup = new PactState(Set.of(new Access("developers",
+                new Resource("registry", Map.of("repository", REPOSITORY.name())),
+                Map.of("actions", Value.set(Set.of(Value.string("read"))), "principal-type", Value.string("group")))));
+        client.groups(List.of(new io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiNamedObject(
+                "11111111-1111-1111-1111-111111111111", "developers", "developers")));
+        var pending = backend.prepareTransaction(desired, namedGroup);
+        client.groups(List.of());
+        assertThrows(ValidationException.class, pending::apply);
+        assertEquals(0, client.deletePermissionCalls());
+    }
+
+    @Test
+    void rejectsExplicitIdentitiesAsNotImplementedBeforeReadingState() {
+        var client = new FakeArtifactKeeperClient(List.of(), List.of(), List.of());
+        var backend = new ArtifactKeeperBackend("registry", client);
+        var desired = new PactState(Set.of(), Set.of(new io.github.pactproject.api.Identity(
+                "registry", "app", true, null, null, null)));
+        assertThrows(io.github.pactproject.api.exception.BackendFeatureNotImplementedException.class,
+                () -> backend.prepareTransaction(PactState.empty(), desired));
+        assertThrows(io.github.pactproject.api.exception.BackendFeatureNotImplementedException.class,
+                () -> backend.apply(desired));
+        assertEquals(0, client.createServiceAccountCalls());
+    }
 
     private static final ArtifactKeeperApiUser ALICE =
             new ArtifactKeeperApiUser("user-1", "alice");
@@ -489,6 +566,29 @@ class ArtifactKeeperBackendTest {
     }
 
     @Test
+    void transactionsRetainOwnDeclarationsAndRollbackDoesNotRestoreManualDrift() throws Exception {
+        var drift = permission("manual-write", ALICE.id(), REPOSITORY.id(), Set.of("write"));
+        var client = client(List.of(ALICE), List.of(REPOSITORY), List.of(drift));
+        var backend = new ArtifactKeeperBackend("ak", client);
+        var previous = state(access(ALICE.username(), REPOSITORY.name(), Set.of("read")));
+        var desired = state(access(ALICE.username(), REPOSITORY.name(), Set.of("write")));
+        var first = backend.prepareTransaction(previous, desired);
+        var second = backend.prepareTransaction(desired, PactState.empty());
+        assertEquals(List.of(drift), client.getPermissions());
+        assertEquals(0, client.createPermissionCalls());
+        assertEquals(0, client.deletePermissionCalls());
+
+        first.apply(); // Actual drift already matches the attempted declaration.
+        second.apply();
+        assertTrue(client.getPermissions().isEmpty());
+        second.rollback();
+        assertEquals(Set.of("write"), client.getPermissions().getFirst().actions());
+        first.rollback();
+        assertEquals(1, client.getPermissions().size());
+        assertEquals(Set.of("read"), client.getPermissions().getFirst().actions());
+    }
+
+    @Test
     void compensationRestoresServiceAccountGrantAfterPartialFailure()
             throws Exception {
         var client = client(List.of(), List.of(REPOSITORY), List.of());
@@ -496,7 +596,7 @@ class ArtifactKeeperBackendTest {
         var previous = state(access("svc-build", REPOSITORY.name(), Set.of("read")));
         backend.apply(previous);
         var accountId = client.getUsers().getFirst().id();
-        var transaction = backend.prepare(previous,
+        var transaction = backend.prepareTransaction(previous,
                 state(access("svc-build", REPOSITORY.name(), Set.of("write"))));
         assertEquals(1, client.createPermissionCalls(), "prepare must not write");
 
@@ -582,7 +682,7 @@ class ArtifactKeeperBackendTest {
         var previous = typedState("alice", "user", "artifact", targetId, Set.of("read"), Map.copyOf(conditions));
         backend.apply(previous);
         assertEquals(0, client.deletePermissionCalls());
-        var transaction = backend.prepare(previous,
+        var transaction = backend.prepareTransaction(previous,
                 typedState("alice", "user", "artifact", targetId, Set.of("read"), Map.of()));
         client.failNextCreatePermission();
         assertThrows(BackendOperationException.class, transaction::apply);
@@ -668,7 +768,7 @@ class ArtifactKeeperBackendTest {
         return new Access(
                 principal,
                 new Resource(
-                        "artifact-keeper",
+                        "ak",
                         Map.of("repository", repository)
                 ),
                 Map.of(

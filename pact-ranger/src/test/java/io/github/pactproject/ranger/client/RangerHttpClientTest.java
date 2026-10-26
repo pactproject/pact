@@ -18,6 +18,109 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RangerHttpClientTest {
     @Test
+    void doesNotExposeReflectedCredentialsInHttpOrJsonErrors() throws Exception {
+        var status = new java.util.concurrent.atomic.AtomicInteger(401);
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            String reflected = "alice denied read on probe-resource; reflected-password "
+                    + exchange.getRequestHeaders().getFirst("Authorization").substring("Basic ".length());
+            byte[] bytes = reflected.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status.get(), bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new RangerHttpClient(new RangerConfig(URI.create(
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/service"),
+                    "sync", "reflected-password", "ozone-cluster", 1));
+            for (int response : new int[] {401, 200}) {
+                status.set(response);
+                var error = assertThrows(io.github.pactproject.ranger.api.RangerClientException.class,
+                        () -> client.getPolicies("ozone-cluster", 1));
+                var output = new java.io.StringWriter();
+                error.printStackTrace(new java.io.PrintWriter(output));
+                assertFalse(output.toString().contains("reflected-password"));
+                assertFalse(output.toString().contains(Base64.getEncoder().encodeToString(
+                        "sync:reflected-password".getBytes(StandardCharsets.UTF_8))));
+                if (response == 401) {
+                    assertEquals(401, error.statusCode());
+                    assertTrue(error.getMessage().contains("alice denied read on probe-resource"));
+                }
+                else assertTrue(error.getMessage().contains("invalid JSON"));
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void doesNotExposeGeneratedPasswordReflectedByFailedUserCreation() throws Exception {
+        var createdPassword = new AtomicReference<String>();
+        var mapper = new ObjectMapper();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/service/xusers/users", exchange -> {
+            String body = "user not found";
+            if (exchange.getRequestMethod().equals("POST")) {
+                body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                createdPassword.set(mapper.readTree(body).path("password").asText());
+            }
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(400, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new RangerHttpClient(new RangerConfig(URI.create(
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/service"),
+                    "sync", "backend-credential", "ozone-cluster", 1));
+            var error = assertThrows(io.github.pactproject.ranger.api.RangerClientException.class,
+                    () -> client.ensureUser("alice"));
+            assertTrue(createdPassword.get() != null && !createdPassword.get().isBlank());
+            assertFalse(error.toString().contains(createdPassword.get()));
+            assertTrue(error.getMessage().contains("alice"));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void readsEveryPolicyPageAndRejectsMalformedLaterPage() throws Exception {
+        var queries = new java.util.ArrayList<String>();
+        var malformed = new java.util.concurrent.atomic.AtomicBoolean();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/service/public/v2/api/service/ozone-cluster/policy", exchange -> {
+            String query = exchange.getRequestURI().getQuery();
+            queries.add(query);
+            String body = query.contains("startIndex=0")
+                    ? "{\"policies\":[{\"id\":1}],\"totalCount\":2}"
+                    : malformed.get() ? "{\"unexpected\":[]}"
+                    : "{\"policies\":[{\"id\":2}],\"totalCount\":2}";
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new RangerHttpClient(new RangerConfig(URI.create(
+                    "http://127.0.0.1:" + server.getAddress().getPort() + "/service"),
+                    "user", "password", "ozone-cluster", 1));
+            assertEquals(java.util.List.of(1L, 2L), client.getPolicies("ozone-cluster", 1)
+                    .stream().map(policy -> policy.path("id").asLong()).toList());
+            assertEquals(java.util.List.of("startIndex=0&pageSize=1", "startIndex=1&pageSize=1"), queries);
+            queries.clear();
+            malformed.set(true);
+            assertThrows(io.github.pactproject.ranger.api.RangerClientException.class,
+                    () -> client.getPolicies("ozone-cluster", 1));
+            assertEquals(2, queries.size(), "A partial catalog must not be accepted as actual state");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void sendsBasicAuthAndUsesConfiguredServiceEndpoint() throws Exception {
         HttpServer server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0),

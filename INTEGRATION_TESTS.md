@@ -1,5 +1,9 @@
 # PACT integration tests
 
+The shared requirements, test inventory and coverage limits are in
+[TESTING.md](TESTING.md). A default Maven pass skips the opt-in live suites;
+report executed service/profile versions separately from source coverage.
+
 Live integration tests are disabled by default. They connect to explicitly
 configured external test services and should only run against isolated
 resources:
@@ -25,15 +29,19 @@ resources:
 - A disposable PostgreSQL cluster and a login with `CREATEDB` and `CREATEROLE`
   authority. The PostgreSQL live test creates a uniquely named temporary
   database and role, applies grants to those objects, and drops both afterward.
-- A disposable Elasticsearch 9 cluster with Security API administration
-  credentials. The live test creates a uniquely named native user with an
-  ephemeral generated password and a deterministic PACT-owned role for a
-  unique index pattern (it does not create an index). It removes only the
-  role it owns and then deletes only that test's uniquely generated user.
+  The cross-database recovery scenario creates two temporary databases and
+  injects failure at the client boundary after a real JDBC commit, then checks
+  restoration of the previous declaration and successful retry.
+- A disposable Elasticsearch 9.2.3 cluster with Security API administration
+  credentials. Live tests create unique native users, custom roles and indices
+  with test documents. They verify actual read/write and cluster authorization,
+  both reconciliation modes, existing/built-in role assignments, account
+  passwords, validation before writes and partial-failure compensation. Cleanup
+  removes only their uniquely generated users, roles and indices.
   `docker compose down -v` removes the dedicated local Elasticsearch data
   volume.
 
-The Ranger test restores its initial managed-policy snapshot; the
+The Ranger test compensates through its previous declared managed-policy states; the
 Artifact Keeper test returns its dedicated instance to the initially empty
 permission state. Its service-account integration test retains the generated
 account because Artifact Keeper does not expose user deletion through this
@@ -71,12 +79,39 @@ Set these variables in the test process:
 | `PACT_IT_ELASTICSEARCH_ENDPOINT` | Yes | Elasticsearch 9 HTTP(S) endpoint. |
 | `PACT_IT_ELASTICSEARCH_USERNAME` | Yes | Elasticsearch Security API administrator/test account. |
 | `PACT_IT_ELASTICSEARCH_PASSWORD` | Yes | Elasticsearch test account password. |
+| `PACT_IT_ELASTICSEARCH_CA_CERTIFICATE` | No | PEM CA bundle path for private HTTPS test servers; enables the real private-CA rejection/acceptance test. |
 
 Kubernetes connectivity uses Fabric8's normal client configuration (for
 example, the current kubeconfig or in-cluster credentials). Because the
 provider lists and watches the CRD cluster-wide, the test identity needs
 cluster-wide `get`, `list`, `watch`, and `patch` access to the custom resource,
 plus `patch` access to its `/status` subresource.
+
+## Focused Elasticsearch 9.2.3 with TLS
+
+This standalone Compose stack creates a private CA and a server certificate
+with localhost and service-name SANs. It uses a separate project/volumes and
+port 19201 by default:
+
+```powershell
+docker compose -p pact-es-923 -f integration/compose.elasticsearch.yaml up -d --wait --wait-timeout 240
+New-Item -ItemType Directory -Force target | Out-Null
+docker cp pact-es-923-elasticsearch-certificates-1:/certificates/ca/ca.crt target/pact-es-ca.crt
+$env:PACT_IT_ELASTICSEARCH_ENDPOINT = 'https://localhost:19201'
+$env:PACT_IT_ELASTICSEARCH_USERNAME = 'elastic'
+$env:PACT_IT_ELASTICSEARCH_PASSWORD = 'PactLocalElastic2!'
+$env:PACT_IT_ELASTICSEARCH_CA_CERTIFICATE = (Resolve-Path target/pact-es-ca.crt).Path
+mvn -B -pl pact-elasticsearch -am -Dpact.integration=true test
+docker compose -p pact-es-923 -f integration/compose.elasticsearch.yaml down -v
+```
+
+The checked-in password is only for this disposable stack. Override
+`PACT_IT_ELASTICSEARCH_PASSWORD` before starting it if needed. The CA private
+key and server key stay in its disposable certificate volume. Linux CI follows
+the same sequence in `.github/workflows/elasticsearch-integration.yml`, also
+running the full unit suite and checking Helm defaults, CA mounts and init
+containers. The existing full multi-backend Compose stack uses plain HTTP for
+Elasticsearch 9.2.3; use this focused stack for live private TLS coverage.
 
 ## Running
 
@@ -131,9 +166,9 @@ docker compose --env-file .\integration\.env -f .\integration\compose.yaml `
 ```
 
 This runner executes the Elasticsearch live test alongside the Ranger,
-Artifact Keeper, and PostgreSQL tests. Its test user name and index pattern
-are generated uniquely for each run; the test cleans up only that user's
-owned PACT role and then the user itself.
+Artifact Keeper, and PostgreSQL tests. Elasticsearch test users, custom roles
+and indices are generated uniquely for each scenario and removed afterward;
+built-in roles and other users' assignments are not changed.
 
 Artifact Keeper CI tests the current API contract against 1.11.1 in its own
 fresh disposable database. It tests service-account creation, private repository
@@ -185,8 +220,9 @@ test admin password before creating fixtures.
 
 The bootstrap creates the dedicated Ranger HDFS service and Artifact Keeper
 test user/repositories. Ranger's test image also provides Ozone, Trino, and
-Kafka service definitions and preconfigured `dev_ozone`, `dev_trino`, and
-`dev_kafka` services; PACT writes only `managed` policies to them during these
+Kafka service definitions; bootstrap explicitly ensures their `dev_ozone`,
+`dev_trino` and `dev_kafka` test services, including on fresh databases.
+PACT writes only `managed` policies to them during these
 tests. No corresponding backend applications are started. The bootstrap
 rejects an Artifact Keeper instance with existing permissions. The tests
 restore their managed state; if a failed test leaves data behind, reset the
@@ -200,7 +236,7 @@ docker compose --env-file .\integration\.env -f .\integration\compose.yaml down 
 Compose project with production or shared backends.
 
 To run the PACT end-to-end path through the `filesystem` state provider,
-reconcile grants to Ranger, Artifact Keeper, and PostgreSQL, then reconcile an
+reconcile grants to Ranger, Artifact Keeper, PostgreSQL and Elasticsearch, then reconcile an
 empty state to clean them up:
 
 ```powershell
@@ -215,6 +251,16 @@ or if repository permissions, managed Ranger policies, or explicit PostgreSQL
 fixture grants remain afterward. Two independent one-shot processes cannot
 test this transition because the filesystem provider does not persist applied
 state across process restarts.
+The Elasticsearch fixture creates a unique native user and two indices outside
+the declaration. It verifies denial before apply, read-only access in the
+declared index, denied access in the other index, a declarative update allowing
+writes, and denial after empty-state cleanup. The test also verifies removal of
+generated roles/assignments while the user and documents still exist, then
+deletes its fixture user/indices. Fixture markers in `e2e/desired-state.yaml`
+are expanded by `PactE2E.java` before the filesystem provider reads the file;
+this does not add identity or environment-variable parsing to that provider.
+The `filesystem-e2e.yml` workflow runs the same Compose path against all four
+backends on relevant pull requests and master pushes.
 The PostgreSQL Maven live test runs as part of the `tests` profile and creates
 its own temporary database and identity on the Compose PostgreSQL service.
 

@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -234,12 +235,14 @@ class KubernetesStateProviderTest
     }
 
     @Test
-    void resolvesPasswordSecretTransientlyAndRestoresOnlyItsVersion()
+    void resolvesSharedIdentityPasswordAndRestoresEachBackendVersion()
             throws Exception
     {
         var reconciler = new RecordingReconciler();
         var provider = new KubernetesStateProvider(kubernetesClient);
-        Map<String, ?> spec = identitySpec(false);
+        Map<String, ?> spec = Map.of("resources", List.of(), "identities", List.of(Map.of(
+                "backends", List.of("postgres", "search"), "name", "app",
+                "passwordSecretRef", Map.of("name", "app-credentials", "key", "password"))));
         String secretVersion = createSecret(
                 "default",
                 "app-credentials",
@@ -265,6 +268,13 @@ class KubernetesStateProviderTest
                 "default/app-credentials/password",
                 identity.passwordSource()
         );
+        assertEquals(Set.of("postgres", "search"), reconciler.appliedStates.getFirst().identities()
+                .stream().map(Identity::backendId).collect(java.util.stream.Collectors.toSet()));
+        for (var resolved : reconciler.appliedStates.getFirst().identities()) {
+            assertTrue(resolved.ensure());
+            assertEquals("s3cret", resolved.password().reveal());
+            assertEquals(secretVersion, resolved.passwordVersion());
+        }
         assertEquals(spec, status(applied).get("lastAppliedSpec"));
         assertTrue(!status(applied).toString().contains("s3cret"));
 
@@ -278,9 +288,42 @@ class KubernetesStateProviderTest
                 .next();
         assertEquals(secretVersion, restored.passwordVersion());
         assertEquals(null, restored.password());
+        assertEquals(2, restoreReconciler.restoredState.identities().size());
+        for (var restoredIdentity : restoreReconciler.restoredState.identities()) {
+            assertEquals(secretVersion, restoredIdentity.passwordVersion());
+            assertEquals(null, restoredIdentity.password());
+        }
         assertTrue(!restoreReconciler.restoredState.toString().contains("s3cret"));
         restarted.close();
         provider.close();
+    }
+
+    @Test
+    void removingBackendFromIdentityListKeepsOtherBackendIdentity() throws Exception {
+        var reconciler = new RecordingReconciler();
+        var provider = new KubernetesStateProvider(kubernetesClient);
+        try {
+            provider.start(reconciler);
+            createDataAccess("default", "identity-list", Map.of("resources", List.of(),
+                    "identities", List.of(Map.of("backends", List.of("postgres", "search"), "name", "app"))));
+            awaitAppliedStateCount(reconciler, 1);
+            assertEquals(2, reconciler.appliedStates.getLast().identities().size());
+            awaitDataAccess("default", "identity-list", resource -> "Ready".equals(statusPhase(resource)));
+
+            kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").withName("identity-list").edit(resource -> {
+                        Long generation = resource.getMetadata().getGeneration();
+                        resource.getMetadata().setGeneration(generation == null ? 1L : generation + 1L);
+                        resource.setAdditionalProperty("spec", Map.of("resources", List.of(),
+                                "identities", List.of(Map.of("backends", List.of("search"), "name", "app"))));
+                        return resource;
+                    });
+            awaitAppliedStateCount(reconciler, 2);
+            assertEquals(java.util.Set.of("search"), reconciler.appliedStates.getLast().identities()
+                    .stream().map(Identity::backendId).collect(java.util.stream.Collectors.toSet()));
+        } finally {
+            provider.close();
+        }
     }
 
     @Test

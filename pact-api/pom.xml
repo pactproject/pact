@@ -10,9 +10,17 @@
     <parent>
         <groupId>io.github.pactproject</groupId>
         <artifactId>pact</artifactId>
-        <version>1.0.0</version>
+        <version>8</version>
     </parent>
 
     <artifactId>pact-api</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 
 </project>

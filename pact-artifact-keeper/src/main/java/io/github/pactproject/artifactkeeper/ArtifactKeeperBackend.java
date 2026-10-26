@@ -1,11 +1,11 @@
 package io.github.pactproject.artifactkeeper;
 
 import io.github.pactproject.api.Backend;
+import io.github.pactproject.api.BackendTransaction;
 import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.exception.BackendException;
 import io.github.pactproject.api.exception.BackendOperationException;
 import io.github.pactproject.api.exception.ValidationException;
-import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiPermission;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperClient;
@@ -21,6 +21,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Objects;
 
 public final class ArtifactKeeperBackend
@@ -32,8 +34,6 @@ public final class ArtifactKeeperBackend
     private final String id;
     private final ArtifactKeeperClient client;
     private final ArtifactKeeperApiProfile apiProfile;
-
-    private ArtifactKeeperState state;
 
     public ArtifactKeeperBackend(
             String id,
@@ -62,14 +62,15 @@ public final class ArtifactKeeperBackend
     public void apply(PactState pactState)
             throws BackendException
     {
+        validateIdentities(pactState.identities());
         List<ArtifactKeeperPermission> desired =
                 compileDesiredState(pactState);
 
-        state = loadState();
-        desired = resolveDesiredState(desired);
+        ArtifactKeeperState state = loadState();
+        desired = resolveDesiredState(desired, state);
 
         List<ActualArtifactKeeperPermission> actual =
-                resolveActualState();
+                resolveActualState(state);
 
         ArtifactKeeperDiff.PermissionDiff diff =
                 ArtifactKeeperDiff.diff(
@@ -83,7 +84,7 @@ public final class ArtifactKeeperBackend
                 diff.create().size(),
                 diff.delete().size()
         );
-        applyDiff(diff);
+        applyDiff(diff, state);
         log.info(
                 "Reconciled Artifact Keeper backend '{}' ({} desired permission(s), "
                         + "{} created, {} deleted)",
@@ -94,11 +95,43 @@ public final class ArtifactKeeperBackend
         );
     }
 
+    @Override
+    public BackendTransaction prepareTransaction(PactState previous, PactState desired,
+            java.util.Set<PactState> recoveryStates) throws BackendException {
+        // Scope is the complete configured instance, including every recovery declaration.
+        for (var recovery : recoveryStates) {
+            validateIdentities(recovery.identities());
+            compileDesiredState(recovery);
+        }
+        return prepareTransaction(previous, desired);
+    }
+
+    @Override
+    public BackendTransaction prepareTransaction(PactState previous, PactState desired)
+            throws BackendException {
+        validateIdentities(desired.identities());
+        List<ArtifactKeeperPermission> compiled = compileDesiredState(desired);
+        ArtifactKeeperState actual = loadState();
+        resolveDesiredState(compiled, actual);
+        try {
+            ArtifactKeeperResolver.resolve(actual);
+        } catch (IllegalArgumentException e) {
+            throw new BackendOperationException("Failed to resolve Artifact Keeper state", e);
+        }
+        // Apply re-reads references: preparation is read-only, not a remote lock.
+        return Backend.super.prepareTransaction(previous, desired);
+    }
+
     private List<ArtifactKeeperPermission> compileDesiredState(
             PactState pactState)
             throws ValidationException
     {
         try {
+            for (var access : pactState.accesses()) {
+                if (!id.equals(access.resource().backendId())) {
+                    throw new IllegalArgumentException("Access backend does not match Artifact Keeper backend '" + id + "'");
+                }
+            }
             return ArtifactKeeperCompiler.compile(
                     pactState
             );
@@ -130,10 +163,10 @@ public final class ArtifactKeeperBackend
     }
 
     private List<ArtifactKeeperPermission> resolveDesiredState(
-            List<ArtifactKeeperPermission> desired) throws ValidationException, BackendOperationException
+            List<ArtifactKeeperPermission> desired, ArtifactKeeperState actual) throws ValidationException, BackendOperationException
     {
         try {
-            return new ArtifactKeeperReferenceResolver(state, client).resolve(desired);
+            return new ArtifactKeeperReferenceResolver(actual, client).resolve(desired);
         } catch (IllegalArgumentException e) {
             throw new ValidationException(e.getMessage(), e);
         } catch (ArtifactKeeperClientException e) {
@@ -141,7 +174,7 @@ public final class ArtifactKeeperBackend
         }
     }
 
-    private List<ActualArtifactKeeperPermission> resolveActualState()
+    private List<ActualArtifactKeeperPermission> resolveActualState(ArtifactKeeperState state)
             throws BackendOperationException
     {
         try {
@@ -158,11 +191,15 @@ public final class ArtifactKeeperBackend
     }
 
     private void applyDiff(
-            ArtifactKeeperDiff.PermissionDiff diff)
+            ArtifactKeeperDiff.PermissionDiff diff, ArtifactKeeperState state)
             throws BackendOperationException, ValidationException
     {
         deletePermissions(diff.delete());
-        createPermissions(diff.create());
+        // Only newly ensured users need a local cache; the permission diff is immutable.
+        Map<String, ArtifactKeeperApiUser> createdUsers = new HashMap<>();
+        for (ArtifactKeeperPermission permission : diff.create()) {
+            createPermission(permission, state, createdUsers);
+        }
     }
 
     private void deletePermissions(
@@ -173,13 +210,12 @@ public final class ArtifactKeeperBackend
                 : permissions) {
 
             try {
+                log.debug("backend={} action=delete_permission result=started permission={}", id, permission);
                 client.deletePermission(
                         permission.id()
                 );
+                log.debug("backend={} action=delete_permission result=completed permission_id={}", id, permission.id());
 
-                state = state.removePermission(
-                        permission.id()
-                );
             }
             catch (ArtifactKeeperClientException e) {
                 throw new BackendOperationException(
@@ -192,34 +228,25 @@ public final class ArtifactKeeperBackend
         }
     }
 
-    private void createPermissions(
-            List<ArtifactKeeperPermission> permissions)
-            throws BackendOperationException, ValidationException
-    {
-        for (ArtifactKeeperPermission permission
-                : permissions) {
-
-            createPermission(permission);
-        }
-    }
-
     private void createPermission(
-            ArtifactKeeperPermission permission)
+            ArtifactKeeperPermission permission, ArtifactKeeperState state,
+            Map<String, ArtifactKeeperApiUser> createdUsers)
             throws BackendOperationException, ValidationException
     {
         String principalType = permission.principalType();
         String principalId = permission.principal();
         if (principalType.equals("user") || principalType.equals("service_account")) {
-            ArtifactKeeperApiUser user = findOrCreateUser(permission.principal());
+            ArtifactKeeperApiUser user = findOrCreateUser(permission.principal(), state, createdUsers);
             principalId = user.id();
             principalType = user.principalType();
         }
         String targetId = permission.targetType().equals("repository")
-                ? repositoryByName(permission.target()).id() : permission.target();
+                ? repositoryByName(permission.target(), state).id() : permission.target();
 
         try {
-            ArtifactKeeperApiPermission created =
-                    client.createPermission(
+            log.debug("backend={} action=create_permission result=started principal={} principal_type={} target_type={} target={} actions={} conditions={}",
+                    id, principalId, principalType, permission.targetType(), targetId, permission.actions(), permission.conditions());
+            client.createPermission(
                             apiProfile.permissionPrincipalType(principalType),
                             principalId,
                             permission.targetType(),
@@ -227,8 +254,8 @@ public final class ArtifactKeeperBackend
                             permission.actions(),
                             permission.conditions()
                     );
+            log.debug("backend={} action=create_permission result=completed principal={} target={}", id, principalId, targetId);
 
-            state = state.addPermission(created);
         }
         catch (ArtifactKeeperClientException e) {
             throw new BackendOperationException(
@@ -244,9 +271,10 @@ public final class ArtifactKeeperBackend
     }
 
     private ArtifactKeeperApiUser findOrCreateUser(
-            String username)
+            String username, ArtifactKeeperState state, Map<String, ArtifactKeeperApiUser> createdUsers)
             throws BackendOperationException, ValidationException
     {
+        if (createdUsers.containsKey(username)) return createdUsers.get(username);
         try {
             return state.userByUsername(username);
         }
@@ -259,7 +287,9 @@ public final class ArtifactKeeperBackend
                 );
             }
 
-            return createServiceAccount(username);
+            var created = createServiceAccount(username);
+            createdUsers.put(username, created);
+            return created;
         }
     }
 
@@ -269,18 +299,15 @@ public final class ArtifactKeeperBackend
     {
         try {
                 log.info(
-                        "Creating Artifact Keeper service account for backend '{}'",
-                        id
+                        "backend={} action=ensure_user result=started principal={}", id, username
                 );
                 ArtifactKeeperApiUser user =
                     client.createServiceAccount(
                             username.substring("svc-".length())
                     );
 
-            state = state.addUser(user);
             log.info(
-                    "Created Artifact Keeper service account for backend '{}'",
-                    id
+                    "backend={} action=ensure_user result=completed principal={} principal_id={}", id, username, user.id()
             );
 
             return user;
@@ -296,7 +323,7 @@ public final class ArtifactKeeperBackend
     }
 
     private ArtifactKeeperApiRepository repositoryByName(
-            String name)
+            String name, ArtifactKeeperState state)
             throws ValidationException
     {
         try {

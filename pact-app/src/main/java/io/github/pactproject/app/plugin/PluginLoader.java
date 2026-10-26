@@ -69,7 +69,7 @@ public final class PluginLoader
                     stateProviderFactories
             );
         }
-        catch (RuntimeException e) {
+        catch (RuntimeException | java.util.ServiceConfigurationError e) {
             try {
                 classLoader.close();
             }

@@ -14,30 +14,52 @@ PACT's extension point is `pact-api`:
 - `Backend` receives a `PactState`. Each access identifies a principal,
   backend id, target, and backend-interpreted attributes.
 - `BackendTransaction` represents an apply/compensation pair.
+- `Backend.validateIdentities` rejects explicit identities by default with a
+  checked `BackendFeatureNotImplementedException`. Core invokes it before
+  application, including for custom prepared transactions. Identity-capable
+  plugins explicitly override validation; unsupported input must never be
+  silently dropped. Direct plugin entry points must preserve that validation.
+- `Backend.close()` releases persistent client resources (default no-op).
+  The application closes backend clients before unloading plugins, including
+  clients created before a later initialization failure. Close must not revoke
+  permissions or delete accounts.
 - `PactCore` groups state by backend id, skips unchanged backends, prepares
   transactions for changed backends, then applies them in deterministic backend
   id order.
 
-The current `Backend.prepare(previous, desired)` default implementation calls
-`apply(desired)` and compensates by calling `apply(previous)`. This is suitable
-only when `apply` is a complete, idempotent reconciliation of the backend's
-owned state. A backend that uses snapshots, performs side effects, or cannot
-reconstruct its owned previous state should override `prepare`.
+`Backend.prepareTransaction(previous, desired)` returns a `BackendTransaction`;
+it does not apply the transition. It may validate declarations, resolve references,
+read actual state and calculate a plan, but must not mutate external state.
+Validation catches detectable input/reference errors before applying any
+backend; it does not guarantee that application will succeed. References,
+authorization and service availability can change after preparation, and a
+write may succeed even when its response is lost.
 
-Core prepares all changed backend transactions before applying any. If any
-apply fails, it calls `rollback` on every prepared transaction in reverse
-order, including transactions whose apply may not have run yet. Therefore,
-preparation must not mutate the external system, and rollback must be safe
-even if apply was never called or only partially completed.
+The default implementation returns a transaction that calls `apply(desired)`
+and compensates by calling `apply(previous)`. Beyond rejecting unsupported
+explicit identities, it does not itself perform preflight validation.
+Rollback's contract is the semantics of reapplying the
+previous agreed declarative state within the transition's scope, subject to
+documented irreversible effects. Backends may optimize those operations, but
+must preserve that result. Use the default only when `apply` is complete,
+idempotent and retains enough cleanup scope; otherwise override `prepareTransaction`.
+
+Core prepares all changed backend transactions before applying any. If
+preparation fails, no applications have started and no rollback runs. If
+application fails, core calls `rollback` only on transactions whose application started,
+in reverse order. This includes the failing transaction because it may have
+partially changed external state; prepared but unstarted transactions are
+excluded. Backend-specific restoration is invoked by core, and must not
+orchestrate other plugins' compensation.
 
 PACT's current backend modules do not yet follow one uniform internal layout:
 
 | Backend | Existing structure | Transaction pattern |
 | --- | --- | --- |
 | Ranger | `compile`, `sync`, `api`, `client`, config and backend | By default reconciles every policy in the configured service; `managed-only` opts into limiting writes/deletes to policies labeled `managed`. Ensures missing policy users, creating them with random passwords that are not retained. |
-| PostgreSQL | `compile`, `model`, `sync`, `api`, `client`, config and backend | Snapshots PACT-granted ACLs; reconciles identities separately; grant rollback does not reverse password changes. |
-| Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend owns most orchestration and mutable working state; uses default `prepare` compensation. Missing `svc-` usernames trigger service-account creation. Account metadata determines logical principal types; the current API writes service-account permissions as `service_account`; the retired `legacy` profile is rejected during backend initialization. |
-| Elasticsearch | `compile`, `model`, `api`, `client`, config and backend | Snapshots PACT-owned roles and reconciles native-user index privileges; preserves unrelated roles. |
+| PostgreSQL | `compile`, `model`, `sync`, `api`, `client`, config and backend | Reconciles ACLs authoritatively by default, with explicit grantor compatibility mode; rollback reapplies previous grants/defaults across the transition scope. Identity/password effects are separate and irreversible. |
+| Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend coordinates compilation, immutable actual state, per-apply account caching and diff application; performs read-only reference validation in `prepareTransaction` and uses previous-state compensation. Missing `svc-` usernames trigger service-account creation. Account metadata determines logical principal types; the current API writes service-account permissions as `service_account`; the retired `legacy` profile is rejected during backend initialization. |
+| Elasticsearch | `compile`, `model`, `sync`, `api`, `client`, config and backend | Official Java client 9.2.3; reconciles owned roles and native-user assignments; rollback synchronizes the previous declaration. Index/cluster privileges and existing roles; `managed` preserves foreign assignments for compatibility, `authoritative` enforces exact roles within declared user scope. Identity creation/rotation is separate from grants. |
 
 Artifact Keeper's current implementation already reflects the authoritative
 scope policy: it loads the permissions returned by `getPermissions()`, diffs
@@ -148,28 +170,49 @@ at plugin creation.
 
 ## Reconciliation and transaction pattern
 
-For a backend with a reliable snapshot API, the recommended flow is:
+Core retains secret-free declarations from uncertain transitions when rollback
+fails. Its next reconciliation targets the current source declaration, including
+an unchanged previous state or empty state; ordinary unchanged backends remain
+skipped. The overload `prepareTransaction(previous, desired, recoveryStates)`
+extends cleanup scope without changing desired grants or the rollback target.
+Override it for recovery support; the API rejects a non-empty recovery context
+by default rather than dropping it. Scoped plugins must retain every attempted
+scope for both apply and rollback. Context is runtime-only for now: restart
+persistence in Kubernetes status/filesystem storage is not implemented.
+
+For a backend that needs preflight checks or an explicit plan, the flow is:
 
 ```text
-prepare(previous, desired):
-    validate and compile desired
+prepareTransaction(previous, desired):
+    validate and compile previous and desired
+    retain cleanup scope from both states
     read actual state for the configured scope and ownership mode
     calculate a deterministic plan
-    return transaction(snapshot, plan)
+    return transaction(previous, scope, plan)
 
 transaction.apply():
     apply the plan; surface partial failure
 
 transaction.rollback():
-    reconcile PACT-owned state back to the snapshot
+    reconcile the same scope to previous agreed state
+    # optimized operations are allowed if they have the same result
 ```
 
 Preparation should not perform mutations. A transaction should capture
-immutable snapshots and plans, not depend on mutable fields shared between
-calls. Apply and rollback should be idempotent or safe to retry after partial
-failure. In the default authoritative mode, reconcile and restore the full
+immutable plans and context, not depend on mutable fields shared between
+calls. Snapshots may assist planning/restoration, but are not a substitute
+for the previous agreed declaration as the restoration target. Ranger reapplies
+compiled previous policies; PostgreSQL reapplies previous grants/default ACLs
+across the transition scope; Elasticsearch reverses the transition through
+its normal synchronizer, without reversing credentials. Apply and rollback should be idempotent or safe
+to retry after partial failure. In the default authoritative mode, reconcile and restore the full
 configured scope. In a preserve-unmanaged opt-in mode, filter both apply and
 rollback consistently so unmanaged objects remain untouched.
+
+Keep the union of previous and attempted target scopes available during
+compensation. If a failed transition moved grants from database A to B,
+restoring A must also remove attempted grants in B. A plain `apply(previous)`
+is insufficient if its argument alone determines the databases to visit.
 
 Not every service can provide atomic transactions. If compensation is
 impossible, state that explicitly and design for convergence: expose useful
@@ -178,9 +221,9 @@ atomicity. Do not pretend an irreversible user creation or password change can
 be rolled back. Make the operation order and retry behavior part of the
 backend contract and documentation.
 
-Use `Backend.prepare`'s default only when applying a complete previous state
+Use `Backend.prepareTransaction`'s default only when applying a complete previous state
 is a correct compensation. If the backend itself already takes snapshots,
-overrides `prepare`, or has irreversible side effects, encode and test those
+overrides `prepareTransaction`, or has irreversible side effects, encode and test those
 semantics explicitly. In particular, do not hide cross-backend transaction
 assumptions inside backend-local mutable state.
 
@@ -206,6 +249,20 @@ as working examples.
 
 ## Testing requirements
 
+Follow [DIAGNOSTICS.md](DIAGNOSTICS.md) for the common logging contract. Require
+partial-write/lost-response recovery and retries in every backend; include failed
+compensation followed by current-source reconciliation and retained cleanup scope.
+Catalog tests must establish complete results for every collection endpoint or
+native catalog, plus zero writes after a failed/incomplete read. A successful
+two-page example alone does not establish that contract.
+
+The canonical checklist, concrete test references, complete suite inventory and
+known coverage gaps are in [TESTING.md](TESTING.md). Meet B01–B11 and applicable
+C01–C05 for a new backend; when updating an existing one, add missing scenarios
+for the affected behavior and update its evidence/gap entries. Keep the module
+README, implementation and assertions in the same change. Validate references
+with `python integration/scripts/check-test-contract.py`.
+
 Tests should prove behavior and ownership, not just that the compiler returns
 an object:
 
@@ -216,9 +273,12 @@ an object:
   state, full-scope deletion by default, opt-in preservation of unmanaged
   objects, duplicate actual objects/name collisions, normalization, and stable
   ordering where order matters.
-- **Backend transaction tests:** snapshot isolation, apply, rollback after
-  successful and partial apply, rollback when apply has not run, retry, and
-  non-compensatable side effects.
+- **Backend transaction/core tests:** read-only preparation, retained plan or
+  snapshot isolation, previous-state restoration after successful and partial
+  apply, no rollback for unstarted transactions or preparation failure, reverse
+  compensation order, cleanup across old/attempted scopes, retry, and
+  non-compensatable side effects. Optimized rollback must produce the same
+  reconciliation result as applying the previous agreed state.
 - **Client tests:** request/response mapping, pagination, authentication,
   timeouts, API errors, malformed responses, safe SQL/URL/identifier handling,
   and confirmation that sensitive values are not logged.
@@ -270,8 +330,10 @@ The maintainer responsible for the backend should verify:
   match the real service semantics;
 - partial failure, rollback, retry, and concurrent-writer behavior are
   accurate and tested;
-- secrets, tokens, SQL, HTTP bodies, and credential-bearing URLs cannot leak
-  through logs, exceptions, status, or snapshots;
+- passwords, API tokens/keys and Authorization values are masked in logs,
+  exceptions, status and snapshots; non-secret SQL, HTTP details, principals,
+  resources and ACLs remain available for diagnosis (log readers are trusted as
+  administrators of all configured backends);
 - config and service-account permissions are least-privilege and documented;
 - tests prove full-scope deletion by default and unmanaged-state preservation
   only when the opt-in is enabled, and run against the real service in an
@@ -290,17 +352,17 @@ Ranger and PostgreSQL already have most of the layered structure above.
 Preserve their service-specific permission semantics and align ownership
 defaults incrementally. Ranger's `managed-only` setting opts into preserving
 policies without the `managed` label; by default all policies in the configured
-service are reconciled. PostgreSQL currently discovers PACT-issued ACL entries
-by grantor and scopes by databases in previous or desired state; assess that
-mechanism against the authoritative-scope baseline before changing it.
+service are reconciled. PostgreSQL defaults to authoritative ACL reconciliation
+across grantors, scoped by databases in previous or desired state. Explicit
+`grantor` mode retains the compatibility boundary. Elasticsearch also defaults
+to authoritative assignments with explicit `managed` compatibility mode.
 
-Artifact Keeper is a candidate for a later structural alignment: move
-orchestration away from the mutable backend working-state field, make its
-configured service-wide permission scope and destructive default explicit,
-and add a prepared transaction with tested compensation. Preserve-unmanaged
+Artifact Keeper keeps actual state local to each application, with a per-call
+cache only for newly ensured users. Preserve its service-wide permission scope,
+read-only preflight and previous-state compensation. Preserve-unmanaged
 mode, if offered, needs a supported way to filter that state; do not confuse a
 generic API `target_type` string with enforcement support.
 
-Elasticsearch implements its own role snapshot and compensation contract.
+Elasticsearch restores previous declarations through its normal synchronizer.
 Do not assume that Artifact Keeper's orchestration is the PACT-wide
 standard; retain each backend's documented scope and transaction semantics.

@@ -16,18 +16,21 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ElasticsearchRoleCompilerTest {
     @Test
+    void requiresExactClusterTargetAndSeparatesClusterFromIndexAttributes() {
+        Map<String, Value> roles = Map.of("roles", Value.set(Set.of(Value.string("monitoring_user"))));
+        var valid = new Access("alice", new Resource("search", Map.of("cluster", "*")), roles);
+        assertEquals(Set.of("monitoring_user"), ElasticsearchRoleCompiler.compile(new PactState(Set.of(valid)), "search").get("alice").assignedRoles());
+        for (Map<String, String> target : java.util.List.of(Map.of("cluster", "other"), Map.of("type", "cluster"), Map.of("index", "logs-*"))) {
+            assertThrows(IllegalArgumentException.class, () -> ElasticsearchRoleCompiler.compile(
+                    new PactState(Set.of(new Access("alice", new Resource("search", target), roles))), "search"));
+        }
+    }
+    @Test
     void aggregatesPrivilegesPerPrincipalAndIndexAndNamesRolesDeterministically() {
         PactState state = new PactState(Set.of(
                 access("alice", "logs-*", "read"),
                 access("alice", "logs-*", "view_index_metadata"),
-                access("alice", "archive-*", "read"),
-                new Access(
-                        "ignored",
-                        new Resource("other", Map.of("index", "unused")),
-                        Map.of("permissions", Value.object(Map.of(
-                                "indices", Value.set(Set.of(Value.string("read")))
-                        )))
-                )
+                access("alice", "archive-*", "read")
         ));
 
         Map<String, ElasticsearchRole> result =
@@ -47,7 +50,15 @@ class ElasticsearchRoleCompilerTest {
     }
 
     @Test
-    void rejectsMalformedTargetAndUnsupportedPrivilege() {
+    void rejectsForeignBackendIdInsteadOfIgnoringAccess() {
+        var foreign = new Access("alice", new Resource("other", Map.of("index", "logs-*")),
+                permissions("read"));
+        assertThrows(IllegalArgumentException.class, () -> ElasticsearchRoleCompiler.compile(
+                new PactState(Set.of(access("alice", "archive-*", "read"), foreign)), "search"));
+    }
+
+    @Test
+    void rejectsMalformedTargetAndPermissionShape() {
         Access badTarget = new Access(
                 "alice",
                 new Resource("search", Map.of(
@@ -55,7 +66,8 @@ class ElasticsearchRoleCompilerTest {
                 )),
                 permissions("read")
         );
-        Access badPrivilege = access("alice", "logs-*", "manage_everything");
+        Access badPrivilege = new Access("alice", new Resource("search", Map.of("index", "logs-*")),
+                Map.of("permissions", Value.object(Map.of("cluster", Value.set(Set.of(Value.string("monitor")))))));
 
         assertThrows(IllegalArgumentException.class, () ->
                 ElasticsearchRoleCompiler.compile(

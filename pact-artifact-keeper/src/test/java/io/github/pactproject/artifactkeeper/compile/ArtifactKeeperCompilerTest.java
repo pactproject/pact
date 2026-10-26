@@ -100,7 +100,7 @@ class ArtifactKeeperCompilerTest {
     }
 
     @Test
-    void ignoresEmptyUsers() {
+    void compilesEmptyState() {
         PactState state = new PactState(Set.of());
 
         List<ArtifactKeeperPermission> result =

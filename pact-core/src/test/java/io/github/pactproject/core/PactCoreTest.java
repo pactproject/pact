@@ -23,6 +23,44 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PactCoreTest {
 
     @Test
+    void rejectsUnimplementedIdentitiesBeforeAnyBackendApplies() {
+        var operations = new ArrayList<String>();
+        var core = new PactCore(List.of(transactionBackend("a-first", operations),
+                transactionBackend("z-unsupported", operations)));
+        var desired = new PactState(Set.of(access("alice", "a-first", "table", "events")),
+                Set.of(new Identity("z-unsupported", "alice", true, null, null, null)));
+
+        var failure = assertThrows(ApplyException.class, () -> core.apply(desired));
+        assertTrue(failure.getCause() instanceof io.github.pactproject.api.exception.BackendFeatureNotImplementedException);
+        assertEquals(List.of("prepare:a-first"), operations);
+    }
+
+    @Test
+    void closesEveryBackendOnceEvenIfOneFailsAndRejectsFurtherWork() throws Exception {
+        var closed = new ArrayList<String>();
+        Backend a = new Backend() {
+            public String id() { return "a"; }
+            public void apply(PactState state) { }
+            public void close() { closed.add("a"); }
+        };
+        Backend b = new Backend() {
+            public String id() { return "b"; }
+            public void apply(PactState state) { }
+            public void close() throws BackendException {
+                closed.add("b");
+                throw new BackendOperationException("Deliberate close failure");
+            }
+        };
+        var core = new PactCore(List.of(a, b));
+        assertThrows(io.github.pactproject.core.exception.CoreException.class, core::close);
+        assertEquals(List.of("b", "a"), closed);
+        core.close();
+        assertEquals(2, closed.size());
+        assertThrows(IllegalStateException.class, () -> core.apply(PactState.empty()));
+        assertThrows(IllegalStateException.class, () -> core.restoreAppliedState(PactState.empty()));
+    }
+
+    @Test
     void appliesNewState() throws Exception {
         var backend = new TestBackend("test");
         var core = new PactCore(List.of(backend));
@@ -38,7 +76,7 @@ class PactCoreTest {
     }
 
     @Test
-    void skipsUnchangedBackend() throws Exception {
+    void skipsUnchangedBackendEvenWhenExternalStateDrifts() throws Exception {
         var backend = new TestBackend("test");
         var core = new PactCore(List.of(backend));
 
@@ -47,10 +85,48 @@ class PactCoreTest {
         );
 
         core.apply(state);
+        backend.currentState = PactState.empty(); // Simulate a manual external change.
         core.apply(state);
 
         assertEquals(1, backend.applyCount());
-        assertEquals(state, backend.currentState());
+        assertEquals(PactState.empty(), backend.currentState());
+    }
+
+    @Test
+    void previousStateKeepsSecretVersionButNotPasswordDuringPreparationAndRollback() throws Exception {
+        var previousStates = new ArrayList<PactState>();
+        var appliedStates = new ArrayList<PactState>();
+        Backend backend = new Backend() {
+            public String id() { return "postgres"; }
+            public void validateIdentities(Set<Identity> identities) { }
+            public BackendTransaction prepareTransaction(PactState previous, PactState desired)
+                    throws BackendException {
+                previousStates.add(previous);
+                return Backend.super.prepareTransaction(previous, desired);
+            }
+            public void apply(PactState state) throws BackendException {
+                appliedStates.add(state);
+                if (state.identities().iterator().next().passwordVersion().equals("8")) {
+                    throw new BackendOperationException("Failed after identity write");
+                }
+            }
+        };
+        var core = new PactCore(List.of(backend));
+        var previous = new PactState(Set.of(), Set.of(new Identity("postgres", "app", true,
+                "app-secret/password", "7", new SecretValue("previous-secret"))));
+        var desired = new PactState(Set.of(), Set.of(new Identity("postgres", "app", true,
+                "app-secret/password", "8", new SecretValue("next-secret"))));
+        core.apply(previous);
+        assertThrows(ApplyException.class, () -> core.apply(desired));
+
+        for (PactState retained : List.of(previousStates.get(1), appliedStates.get(2))) {
+            var identity = retained.identities().iterator().next();
+            assertEquals("app-secret/password", identity.passwordSource());
+            assertEquals("7", identity.passwordVersion());
+            org.junit.jupiter.api.Assertions.assertNull(identity.password());
+        }
+        core.apply(previous);
+        assertEquals(3, appliedStates.size(), "Failed rotation must not advance the agreed state");
     }
 
     @Test
@@ -138,7 +214,7 @@ class PactCoreTest {
     }
 
     @Test
-    void rollsBackPreparedTransactionsWhenPreparationFails() {
+    void doesNotRollBackPreparedTransactionsWhenPreparationFails() {
         var operations = new ArrayList<String>();
         Backend prepared = transactionBackend("first", operations);
         Backend failing = new Backend()
@@ -156,7 +232,7 @@ class PactCoreTest {
             }
 
             @Override
-            public BackendTransaction prepare(
+            public BackendTransaction prepareTransaction(
                     PactState previousState,
                     PactState desiredState)
                     throws BackendException
@@ -178,11 +254,64 @@ class PactCoreTest {
         assertEquals(
                 List.of(
                         "prepare:first",
-                        "prepare:second",
-                        "rollback:first"
+                        "prepare:second"
                 ),
                 operations
         );
+    }
+
+    @Test
+    void rollsBackOnlyStartedTransactionsInReverseOrderIncludingFailedApply() {
+        var operations = new ArrayList<String>();
+        var core = new PactCore(List.of(
+                transactionBackend("04-unstarted", operations),
+                transactionBackend("03-failing", operations, true),
+                transactionBackend("02-second", operations),
+                transactionBackend("01-first", operations)
+        ));
+
+        assertThrows(ApplyException.class, () -> core.apply(state(
+                access("alice", "01-first", "table", "events"),
+                access("alice", "02-second", "table", "events"),
+                access("alice", "03-failing", "table", "events"),
+                access("alice", "04-unstarted", "table", "events")
+        )));
+
+        assertEquals(List.of(
+                "prepare:01-first",
+                "prepare:02-second",
+                "prepare:03-failing",
+                "prepare:04-unstarted",
+                "apply:01-first",
+                "apply:02-second",
+                "apply:03-failing",
+                "rollback:03-failing",
+                "rollback:02-second",
+                "rollback:01-first"
+        ), operations);
+    }
+
+    @Test
+    void defaultRollbackReappliesPreviousStateAfterPartialWriteAndAllowsRetry()
+            throws Exception {
+        var backend = new TestBackend("test");
+        var core = new PactCore(List.of(backend));
+        var previous = initialStateFor("test");
+        var desired = desiredStateFor("test");
+        core.apply(previous);
+        backend.failAfterWriting(desired);
+
+        assertThrows(ApplyException.class, () -> core.apply(desired));
+
+        assertEquals(previous, backend.currentState());
+        assertEquals(List.of(previous, desired, previous), backend.appliedStates());
+        core.apply(previous);
+        assertEquals(3, backend.applyCount(), "Failed transitions must not advance applied state");
+
+        backend.clearFailures();
+        core.apply(desired);
+        assertEquals(desired, backend.currentState());
+        assertEquals(4, backend.applyCount());
     }
 
     @Test
@@ -394,6 +523,23 @@ class PactCoreTest {
     }
 
     @Test
+    void continuesCompensationAfterMultipleRollbackFailuresAndRetainsOriginalFailure() {
+        var operations = new ArrayList<String>();
+        var core = new PactCore(List.of(transactionBackend("a", operations),
+                transactionBackend("b", operations, false, true),
+                transactionBackend("c", operations, true, true)));
+        var failure = assertThrows(RollbackException.class, () -> core.apply(state(
+                access("alice", "a", "table", "events"),
+                access("alice", "b", "table", "events"),
+                access("alice", "c", "table", "events"))));
+        assertEquals(List.of("rollback:c", "rollback:b", "rollback:a"),
+                operations.subList(operations.size() - 3, operations.size()));
+        assertEquals("Rollback failed: c", failure.getCause().getMessage());
+        assertEquals(List.of("Rollback failed: b", "Apply failed"),
+                Arrays.stream(failure.getSuppressed()).map(Throwable::getMessage).toList());
+    }
+
+    @Test
     void throwsRollbackExceptionWhenRollbackFails() throws Exception {
         var first = new TestBackend("first");
         var second = new TestBackend("second");
@@ -466,6 +612,23 @@ class PactCoreTest {
             String id,
             List<String> operations)
     {
+        return transactionBackend(id, operations, false);
+    }
+
+    private static Backend transactionBackend(
+            String id,
+            List<String> operations,
+            boolean failApply)
+    {
+        return transactionBackend(id, operations, failApply, false);
+    }
+
+    private static Backend transactionBackend(
+            String id,
+            List<String> operations,
+            boolean failApply,
+            boolean failRollback)
+    {
         return new Backend()
         {
             @Override
@@ -483,7 +646,7 @@ class PactCoreTest {
             }
 
             @Override
-            public BackendTransaction prepare(
+            public BackendTransaction prepareTransaction(
                     PactState previousState,
                     PactState desiredState)
             {
@@ -491,15 +654,19 @@ class PactCoreTest {
                 return new BackendTransaction()
                 {
                     @Override
-                    public void apply()
+                    public void apply() throws BackendException
                     {
                         operations.add("apply:" + id);
+                        if (failApply) {
+                            throw new BackendOperationException("Apply failed");
+                        }
                     }
 
                     @Override
-                    public void rollback()
+                    public void rollback() throws BackendException
                     {
                         operations.add("rollback:" + id);
+                        if (failRollback) throw new BackendOperationException("Rollback failed: " + id);
                     }
                 };
             }
@@ -538,6 +705,9 @@ class PactCoreTest {
         private final Set<PactState> failingStates =
                 new HashSet<>();
 
+        private final Set<PactState> partiallyFailingStates =
+                new HashSet<>();
+
         private PactState currentState =
                 PactState.empty();
 
@@ -551,6 +721,9 @@ class PactCoreTest {
         }
 
         @Override
+        public void validateIdentities(Set<Identity> identities) { }
+
+        @Override
         public void apply(PactState state)
                 throws BackendOperationException {
 
@@ -562,6 +735,9 @@ class PactCoreTest {
 
             appliedStates.add(state);
             currentState = state;
+            if (partiallyFailingStates.contains(state)) {
+                throw new BackendOperationException("Apply failed after writing");
+            }
         }
 
         void failOn(PactState state) {
@@ -570,6 +746,11 @@ class PactCoreTest {
 
         void clearFailures() {
             failingStates.clear();
+            partiallyFailingStates.clear();
+        }
+
+        void failAfterWriting(PactState state) {
+            partiallyFailingStates.add(state);
         }
 
         PactState currentState() {

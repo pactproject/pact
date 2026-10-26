@@ -707,6 +707,7 @@ public final class DataAccessController
     private PactState resolveCredentials(PactState state, String namespace)
     {
         Set<Identity> identities = new HashSet<>();
+        Map<String, Secret> secrets = new HashMap<>();
         for (Identity identity : state.identities()) {
             if (identity.passwordSource() == null) {
                 identities.add(identity);
@@ -723,10 +724,10 @@ public final class DataAccessController
                     identity.passwordSource().substring(0, separator);
             String secretKey =
                     identity.passwordSource().substring(separator + 1);
-            Secret secret = client.secrets()
+            Secret secret = secrets.computeIfAbsent(secretName, name -> client.secrets()
                     .inNamespace(namespace)
-                    .withName(secretName)
-                    .get();
+                    .withName(name)
+                    .get());
             if (secret == null) {
                 throw new IllegalArgumentException(
                         "Password Secret '" + secretName

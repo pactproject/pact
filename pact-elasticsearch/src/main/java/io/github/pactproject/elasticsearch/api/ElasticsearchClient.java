@@ -2,7 +2,10 @@ package io.github.pactproject.elasticsearch.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
-public interface ElasticsearchClient {
+public interface ElasticsearchClient extends AutoCloseable {
+    ElasticsearchPrivileges getPrivileges() throws ElasticsearchClientException;
+
+    @Override default void close() throws ElasticsearchClientException { }
     JsonNode getRole(String name) throws ElasticsearchClientException;
 
     JsonNode getUser(String username) throws ElasticsearchClientException;

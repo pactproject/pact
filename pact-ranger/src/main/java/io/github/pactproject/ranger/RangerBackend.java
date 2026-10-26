@@ -37,7 +37,7 @@ public final class RangerBackend implements Backend {
                 client,
                 config.serviceName(),
                 config.pageSize(),
-                config.managedOnly()
+                config.managedOnly(), id
         );
     }
 
@@ -48,15 +48,31 @@ public final class RangerBackend implements Backend {
 
     @Override
     public void apply(PactState state) throws BackendException {
-        BackendTransaction transaction = prepare(PactState.empty(), state);
+        BackendTransaction transaction = prepareTransaction(PactState.empty(), state);
         transaction.apply();
     }
 
     @Override
-    public BackendTransaction prepare(
+    public BackendTransaction prepareTransaction(PactState previous, PactState desired,
+            java.util.Set<PactState> recoveryStates) throws BackendException {
+        // The configured service (and optional managed filter) is already the full cleanup scope.
+        for (var recovery : recoveryStates) {
+            validateIdentities(recovery.identities());
+            for (var access : recovery.accesses()) {
+                if (!id.equals(access.resource().backendId())) {
+                    throw new io.github.pactproject.api.exception.ValidationException("Recovery backend does not match Ranger backend '" + id + "'");
+                }
+            }
+        }
+        return prepareTransaction(previous, desired);
+    }
+
+    @Override
+    public BackendTransaction prepareTransaction(
             PactState previousState,
             PactState desiredState
     ) throws BackendException {
+        validateIdentities(desiredState.identities());
         try {
             String serviceType = client.getServiceType(config.serviceName());
             JsonNode serviceDefinition =
@@ -73,13 +89,15 @@ public final class RangerBackend implements Backend {
                     serviceType,
                     config.serviceName()
             );
-            List<JsonNode> snapshot = sync.getPoliciesInScope();
+            List<ObjectNode> previous = RangerPolicyCompiler.compile(
+                    previousState, parsedDefinition, id, serviceType, config.serviceName());
+            List<JsonNode> observedPolicies = sync.getPoliciesInScope();
             log.debug(
                     "Prepared Ranger reconciliation for backend '{}' with {} desired "
-                            + "policy/policies and {} snapshot policy/policies",
+                            + "policy/policies and {} actual policy/policies",
                     id,
                     desired.size(),
-                    snapshot.size()
+                    observedPolicies.size()
             );
 
             return new BackendTransaction() {
@@ -101,10 +119,10 @@ public final class RangerBackend implements Backend {
                 public void rollback() throws BackendException {
                     log.info(
                             "Restoring {} Ranger policy/policies for backend '{}'",
-                            snapshot.size(),
+                            previous.size(),
                             id
                     );
-                    synchronize(snapshot);
+                    synchronize(previous);
                     log.info(
                             "Restored Ranger policies for backend '{}'",
                             id

@@ -105,7 +105,7 @@ public final class PactApplication
                 );
             }
             catch (Exception e) {
-                closeManagedStateProvider(components, e);
+                closeComponents(components, e);
                 try {
                     plugins.close();
                 }
@@ -130,7 +130,7 @@ public final class PactApplication
         }
     }
 
-    private static void closeManagedStateProvider(
+    private static void closeComponents(
             PactComponents components,
             Exception failure)
     {
@@ -142,6 +142,12 @@ public final class PactApplication
             }
             catch (RuntimeException closeException) {
                 failure.addSuppressed(closeException);
+            }
+        }
+        if (components != null) {
+            for (var backend : components.backends().reversed()) {
+                try { backend.close(); }
+                catch (Exception e) { failure.addSuppressed(e); }
             }
         }
     }
@@ -248,6 +254,11 @@ public final class PactApplication
         }
         finally {
             shutdown.countDown();
+        }
+        try { core.close(); }
+        catch (CoreException e) {
+            if (closeFailure == null) closeFailure = new IllegalStateException("Failed to close backend clients", e);
+            else closeFailure.addSuppressed(e);
         }
         try {
             plugins.close();

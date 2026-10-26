@@ -37,6 +37,7 @@ public final class RangerHttpClient implements RangerClient {
     private final ObjectMapper mapper;
     private final URI baseUrl;
     private final String authorization;
+    private final String password;
 
     public RangerHttpClient(RangerConfig config) {
         this(HttpClient.newBuilder()
@@ -82,6 +83,7 @@ public final class RangerHttpClient implements RangerClient {
         this.authorization = "Basic " + Base64.getEncoder().encodeToString(
                 credentials.getBytes(StandardCharsets.UTF_8)
         );
+        this.password = config.password();
     }
 
     @Override
@@ -115,8 +117,11 @@ public final class RangerHttpClient implements RangerClient {
     @Override
     public List<JsonNode> getPolicies(String serviceName, int pageSize)
             throws RangerClientException {
+        if (pageSize < 1) throw new RangerClientException("Ranger policy page size must be positive");
         List<JsonNode> result = new ArrayList<>();
         int startIndex = 0;
+        var seenIds = new java.util.HashSet<Long>();
+        Integer expectedTotal = null;
         while (true) {
             JsonNode response = request(
                     "GET",
@@ -137,12 +142,28 @@ public final class RangerHttpClient implements RangerClient {
                         "Ranger returned an invalid policy list response"
                 );
             }
-            policies.forEach(result::add);
             int totalCount = response.path("totalCount").asInt(-1);
+            if (response.has("totalCount") && (!response.path("totalCount").isIntegralNumber()
+                    || !response.path("totalCount").canConvertToInt() || totalCount < 0)) {
+                throw new RangerClientException("Ranger returned an invalid policy catalog totalCount");
+            }
+            if (expectedTotal != null && totalCount != expectedTotal) {
+                throw new RangerClientException("Ranger policy catalog totalCount changed during read");
+            }
+            if (totalCount >= 0) expectedTotal = totalCount;
+            for (var policy : policies) {
+                if (!policy.path("id").isIntegralNumber() || !policy.path("id").canConvertToLong()
+                        || policy.path("id").asLong() < 1 || !seenIds.add(policy.path("id").asLong())) {
+                    throw new RangerClientException("Ranger policy catalog contains a missing or repeated ID");
+                }
+                result.add(policy);
+            }
             startIndex += policies.size();
-            if (policies.isEmpty()
-                    || policies.size() < pageSize
-                    || (totalCount >= 0 && startIndex >= totalCount)) {
+            if (totalCount >= 0 && (startIndex > totalCount || (policies.isEmpty() && startIndex < totalCount))) {
+                throw new RangerClientException("Ranger policy catalog is incomplete or inconsistent");
+            }
+            if ((totalCount >= 0 && startIndex == totalCount)
+                    || (totalCount < 0 && policies.size() < pageSize)) {
                 return List.copyOf(result);
             }
         }
@@ -181,6 +202,8 @@ public final class RangerHttpClient implements RangerClient {
             String path,
             ObjectNode body
     ) throws RangerClientException {
+        String[] secrets = {password, authorization, authorization.substring("Basic ".length()),
+                body == null ? null : body.path("password").asText(null)};
         HttpRequest.Builder builder = HttpRequest.newBuilder(
                         baseUrl.resolve(path))
                 .timeout(Duration.ofSeconds(30))
@@ -198,8 +221,7 @@ public final class RangerHttpClient implements RangerClient {
             }
             catch (JsonProcessingException e) {
                 throw new RangerClientException(
-                        "Failed to serialize Ranger request",
-                        e
+                        "Failed to serialize Ranger request"
                 );
             }
         }
@@ -213,10 +235,8 @@ public final class RangerHttpClient implements RangerClient {
             if (status < 200 || status >= 300) {
                 throw new RangerClientException(
                         "Ranger API " + method + " " + path
-                                + " returned HTTP " + status
-                                + (response.body().isBlank()
-                                ? ""
-                                : ": " + response.body()),
+                                + " returned HTTP " + status + ": "
+                                + io.github.pactproject.api.DiagnosticSanitizer.redact(response.body(), secrets),
                         status
                 );
             }
@@ -225,10 +245,14 @@ public final class RangerHttpClient implements RangerClient {
             }
             return mapper.readTree(response.body());
         }
+        catch (JsonProcessingException e) {
+            throw new RangerClientException("Ranger API returned invalid JSON: " + method + " " + path
+                    + ": " + io.github.pactproject.api.DiagnosticSanitizer.redact(e.getMessage(), secrets));
+        }
         catch (IOException e) {
             throw new RangerClientException(
-                    "Ranger API request failed: " + method + " " + path,
-                    e
+                    "Ranger API request failed: " + method + " " + path + ": " + e.getClass().getSimpleName()
+                            + ": " + io.github.pactproject.api.DiagnosticSanitizer.redact(e.getMessage(), secrets)
             );
         }
         catch (InterruptedException e) {

@@ -1,0 +1,36 @@
+name: Filesystem E2E
+
+on:
+  pull_request:
+    paths: ["pact-*/**", "integration/**", "pom.xml", ".github/workflows/filesystem-e2e.yml"]
+  push:
+    branches: [master]
+    paths: ["pact-*/**", "integration/**", "pom.xml", ".github/workflows/filesystem-e2e.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build current application and plugin runner
+        run: docker compose -p pact-filesystem-e2e -f integration/compose.yaml --profile e2e build ranger-bootstrap
+      - name: Reconcile all backends, verify Elasticsearch authorization and empty-state cleanup
+        run: docker compose -p pact-filesystem-e2e -f integration/compose.yaml --profile e2e run --name pact-filesystem-e2e-runner pact-e2e
+      - name: Collect application E2E log
+        if: always()
+        run: |
+          mkdir -p target
+          docker logs pact-filesystem-e2e-runner > target/filesystem-e2e.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: filesystem-e2e-log
+          path: target/filesystem-e2e.log
+      - name: Remove disposable stack
+        if: always()
+        run: docker compose -p pact-filesystem-e2e -f integration/compose.yaml --profile e2e down -v --remove-orphans

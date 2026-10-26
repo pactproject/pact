@@ -26,6 +26,36 @@ class ArtifactKeeperHttpClientTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void doesNotExposeReflectedTokenInHttpOrJsonErrors() throws Exception {
+        var status = new java.util.concurrent.atomic.AtomicInteger(401);
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            byte[] bytes = ("alice denied read on probe-resource; "
+                    + exchange.getRequestHeaders().getFirst("Authorization")).getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status.get(), bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new ArtifactKeeperHttpClient(new ArtifactKeeperConfig(java.net.URI.create(
+                    "http://127.0.0.1:" + server.getAddress().getPort()), "reflected-secret-token", 1,
+                    ArtifactKeeperApiProfile.CURRENT));
+            for (int response : new int[] {401, 200}) {
+                status.set(response);
+                var error = assertThrows(ArtifactKeeperClientException.class, client::getUsers);
+                var output = new java.io.StringWriter();
+                error.printStackTrace(new java.io.PrintWriter(output));
+                assertFalse(output.toString().contains("reflected-secret-token"));
+                assertTrue(error.getMessage().contains(response == 401 ? "HTTP 401" : "invalid JSON"));
+                if (response == 401) assertTrue(error.getMessage().contains("alice denied read on probe-resource"));
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void readsPagedGroupsUnpagedProjectsAndQualifiedArtifactMetadata() throws Exception, ArtifactKeeperClientException {
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         var artifactUri = new AtomicReference<java.net.URI>();

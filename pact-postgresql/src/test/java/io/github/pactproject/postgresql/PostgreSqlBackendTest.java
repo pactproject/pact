@@ -30,22 +30,61 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PostgreSqlBackendTest {
     @Test
-    void appliesDesiredStateAndCompensatesToSnapshot() throws Exception {
+    void recoveryScopeIncludesFailedDatabaseWhenSourceMovesElsewhere() throws Exception {
+        var client = new FakeClient();
+        var outside = grant("outside", "alice", Privilege.CONNECT);
+        client.actual.addAll(Set.of(grant("a", "alice", Privilege.CONNECT),
+                grant("b", "alice", Privilege.CREATE), outside));
+        var previous = state("alice", "a", "CONNECT");
+        var desired = state("alice", "c", "CREATE");
+        var transaction = new PostgreSqlBackend("postgres", client).prepareTransaction(previous, desired,
+                Set.of(state("alice", "b", "CREATE")));
+        assertEquals(3, client.actual.size(), "Recovery preparation must remain read-only");
+        transaction.apply();
+        assertEquals(Set.of(grant("c", "alice", Privilege.CREATE), outside), client.actual);
+        transaction.rollback();
+        assertEquals(Set.of(grant("a", "alice", Privilege.CONNECT), outside), client.actual);
+    }
+
+    @Test
+    void compensatesCommittedDatabaseWhenLaterDatabaseFailsAndAllowsRetry() throws Exception {
+        var client = new FakeClient();
+        var previous = state("alice", "a-old", "CONNECT");
+        var desired = state("alice", "z-new", "CREATE");
+        var oldGrant = grant("a-old", "alice", Privilege.CONNECT);
+        var outside = grant("outside", "bob", Privilege.CONNECT);
+        client.actual.addAll(Set.of(oldGrant, outside));
+        var backend = new PostgreSqlBackend("postgres", client);
+        var transaction = backend.prepareTransaction(previous, desired);
+        assertEquals(Set.of(oldGrant, outside), client.actual, "Preparation must be read-only");
+        client.failBeforeDatabase = "z-new";
+
+        assertThrows(BackendOperationException.class, transaction::apply);
+        assertEquals(Set.of(outside), client.actual, "The first database already committed its revocation");
+        transaction.rollback();
+        assertEquals(Set.of(oldGrant, outside), client.actual);
+        backend.prepareTransaction(previous, desired).apply();
+        assertEquals(Set.of(grant("z-new", "alice", Privilege.CREATE), outside), client.actual);
+    }
+
+    @Test
+    void rollbackRestoresDeclaredStateAndCleansAttemptedDatabaseInsteadOfSnapshot() throws Exception {
         FakeClient client = new FakeClient();
         Grant existing = grant("analytics", "alice", Privilege.CONNECT);
         client.actual.add(existing);
+        client.actual.add(grant("analytics", "alice", Privilege.CREATE));
         Grant unrelated = grant("unmanaged", "bob", Privilege.CREATE);
         client.actual.add(unrelated);
         PostgreSqlBackend backend = new PostgreSqlBackend("postgres", client);
 
         PactState previous = state("alice", "analytics", "CONNECT");
-        PactState desired = state("alice", "analytics", "CREATE");
-        BackendTransaction transaction = backend.prepare(previous, desired);
+        PactState desired = state("alice", "new-database", "CREATE");
+        BackendTransaction transaction = backend.prepareTransaction(previous, desired);
 
         transaction.apply();
         assertEquals(
                 Set.of(
-                        grant("analytics", "alice", Privilege.CREATE),
+                        grant("new-database", "alice", Privilege.CREATE),
                         unrelated
                 ),
                 client.actual
@@ -68,7 +107,7 @@ class PostgreSqlBackendTest {
                 Map.of()
         )));
 
-        backend.prepare(previous, desired).apply();
+        backend.prepareTransaction(previous, desired).apply();
         assertEquals(Set.of(), client.actual);
     }
 
@@ -80,7 +119,7 @@ class PostgreSqlBackendTest {
 
         assertThrows(
                 ValidationException.class,
-                () -> backend.prepare(PactState.empty(), invalid)
+                () -> backend.prepareTransaction(PactState.empty(), invalid)
         );
         assertEquals(Set.of(), client.actual);
     }
@@ -93,7 +132,7 @@ class PostgreSqlBackendTest {
 
         assertThrows(
                 BackendOperationException.class,
-                () -> backend.prepare(
+                () -> backend.prepareTransaction(
                         PactState.empty(),
                         state("alice", "analytics", "CONNECT")
                 )
@@ -113,7 +152,7 @@ class PostgreSqlBackendTest {
                 null
         );
 
-        backend.prepare(
+        backend.prepareTransaction(
                 PactState.empty(),
                 new PactState(Set.of(), Set.of(identity))
         ).apply();
@@ -135,7 +174,7 @@ class PostgreSqlBackendTest {
                 new io.github.pactproject.api.SecretValue("rotated")
         );
 
-        backend.prepare(
+        backend.prepareTransaction(
                 PactState.empty(),
                 new PactState(
                         state("alice", "analytics", "CONNECT").accesses(),
@@ -159,7 +198,7 @@ class PostgreSqlBackendTest {
                 null,
                 null
         );
-        BackendTransaction transaction = backend.prepare(
+        BackendTransaction transaction = backend.prepareTransaction(
                 PactState.empty(),
                 new PactState(Set.of(), Set.of(identity))
         );
@@ -205,6 +244,7 @@ class PostgreSqlBackendTest {
         private Set<Identity> desiredIdentities = Set.of();
         private final List<String> operations = new ArrayList<>();
         private boolean failOnRead;
+        private String failBeforeDatabase;
         private int identityReconciliationCount;
 
         @Override
@@ -244,14 +284,20 @@ class PostgreSqlBackendTest {
                 Set<DefaultPrivilegeGrant> desiredDefaults,
                 Set<DefaultPrivilegeScope> defaultScopes,
                 Set<DefaultPrivilegeOverride> overrides
-        ) {
+        ) throws PostgreSqlClientException {
             operations.add("grants");
-            actual.removeIf(grant -> databases.contains(grant.target().database()));
-            actual.addAll(desired);
-            actualDefaults.removeIf(
-                    grant -> defaultScopes.contains(grant.scope())
-            );
-            actualDefaults.addAll(desiredDefaults);
+            for (String database : new java.util.TreeSet<>(databases)) {
+                if (database.equals(failBeforeDatabase)) {
+                    failBeforeDatabase = null;
+                    throw new PostgreSqlClientException("Later database unavailable");
+                }
+                actual.removeIf(grant -> database.equals(grant.database()));
+                desired.stream().filter(grant -> database.equals(grant.database())).forEach(actual::add);
+                actualDefaults.removeIf(grant -> database.equals(grant.scope().database())
+                        && defaultScopes.contains(grant.scope()));
+                desiredDefaults.stream().filter(grant -> database.equals(grant.scope().database()))
+                        .forEach(actualDefaults::add);
+            }
         }
     }
 }

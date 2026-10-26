@@ -28,6 +28,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ElasticsearchBackendTest {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(ElasticsearchReconciliationMode.class)
+    void recoveryRemovesAssignmentsOfAttemptedUsersOutsidePreviousAndCurrentState(ElasticsearchReconciliationMode mode)
+            throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice"));
+        client.users.put("bob", user("bob", "attempted-role", "foreign"));
+        var backend = backend(client, "require", mode);
+        var previous = state(access("alice", "old-*", "read"));
+        backend.apply(previous);
+        var attempted = state(new Access("bob", new Resource("search", Map.of("cluster", "*")),
+                Map.of("roles", Value.set(Set.of(Value.string("attempted-role"))))));
+        var transaction = backend.prepareTransaction(previous, state(access("alice", "new-*", "write")), Set.of(attempted));
+        transaction.apply();
+        assertEquals(mode == ElasticsearchReconciliationMode.MANAGED ? Set.of("foreign") : Set.of(), client.rolesOf("bob"));
+        transaction.rollback();
+        assertEquals(mode == ElasticsearchReconciliationMode.MANAGED ? Set.of("foreign") : Set.of(), client.rolesOf("bob"));
+        assertEquals(Set.of(roleName("alice")), client.rolesOf("alice"));
+        assertTrue(client.roles.get(roleName("alice")).toString().contains("old-*"));
+    }
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
@@ -38,7 +59,7 @@ class ElasticsearchBackendTest {
         ElasticsearchBackend backend = backend(client, "require");
         PactState desired = state(access("alice", "logs-*", "read"));
 
-        backend.prepare(PactState.empty(), desired).apply();
+        backend.prepareTransaction(PactState.empty(), desired).apply();
         String role = roleName("alice");
         assertTrue(client.roles.containsKey(role));
         assertTrue(client.roles.get(role).path("metadata")
@@ -47,7 +68,7 @@ class ElasticsearchBackendTest {
         assertEquals("unchanged", client.users.get("alice")
                 .path("metadata").path("note").asText());
 
-        backend.prepare(desired, PactState.empty()).apply();
+        backend.prepareTransaction(desired, PactState.empty()).apply();
         assertFalse(client.roles.containsKey(role));
         assertEquals(Set.of("other-role", "ops"), client.rolesOf("alice"));
     }
@@ -64,11 +85,11 @@ class ElasticsearchBackendTest {
                 ))
         );
 
-        backend.prepare(PactState.empty(), initial).apply();
+        backend.prepareTransaction(PactState.empty(), initial).apply();
         assertNotNull(client.users.get("ensure-user"));
         assertTrue(client.users.get("ensure-user").path("roles").isArray());
         assertFalse(client.users.get("ensure-user").has("password"));
-        backend.prepare(initial, PactState.empty()).apply();
+        backend.prepareTransaction(initial, PactState.empty()).apply();
         assertFalse(client.roles.containsKey(roleName("ensure-user")));
         assertNotNull(client.users.get("ensure-user"));
     }
@@ -90,12 +111,12 @@ class ElasticsearchBackendTest {
                 rotatedIdentity,
                 access("alice", "logs-*", "read")
         );
-        backend.prepare(oldState, rotatedState).apply();
+        backend.prepareTransaction(oldState, rotatedState).apply();
         assertEquals("new-password", client.passwordUpdates.get("alice"));
 
         client.passwordUpdates.clear();
         Identity sameVersion = identity("2", "not-applied");
-        backend.prepare(
+        backend.prepareTransaction(
                 rotatedState,
                 state(
                         sameVersion,
@@ -107,7 +128,7 @@ class ElasticsearchBackendTest {
         FakeClient creationClient = new FakeClient();
         ElasticsearchBackend creationBackend =
                 backend(creationClient, "ensure");
-        creationBackend.prepare(
+        creationBackend.prepareTransaction(
                 PactState.empty(),
                 state(
                         new Identity(
@@ -133,7 +154,7 @@ class ElasticsearchBackendTest {
         ElasticsearchBackend backend = backend(client, "ensure");
         PactState withoutEnsure = state(access("alice", "logs-*", "read"));
         assertThrows(ValidationException.class, () ->
-                backend.prepare(PactState.empty(), withoutEnsure));
+                backend.prepareTransaction(PactState.empty(), withoutEnsure));
 
         String roleName = roleName("alice");
         ObjectNode unmanaged = MAPPER.createObjectNode();
@@ -146,7 +167,7 @@ class ElasticsearchBackendTest {
                 ))
         );
         assertThrows(ValidationException.class, () ->
-                backend.prepare(PactState.empty(), desired));
+                backend.prepareTransaction(PactState.empty(), desired));
         assertEquals("other", client.roles.get(roleName)
                 .path("metadata").path("owner").asText());
     }
@@ -157,7 +178,7 @@ class ElasticsearchBackendTest {
         client.users.put("alice", user("alice"));
         ElasticsearchBackend backend = backend(client, "require");
         PactState desired = state(access("alice", "logs-*", "read"));
-        var transaction = backend.prepare(PactState.empty(), desired);
+        var transaction = backend.prepareTransaction(PactState.empty(), desired);
 
         ObjectNode unmanaged = MAPPER.createObjectNode();
         unmanaged.putObject("metadata").put("owner", "other");
@@ -176,7 +197,7 @@ class ElasticsearchBackendTest {
         client.failUserUpdate = true;
         ElasticsearchBackend backend = backend(client, "require");
         PactState desired = state(access("alice", "logs-*", "read"));
-        var transaction = backend.prepare(PactState.empty(), desired);
+        var transaction = backend.prepareTransaction(PactState.empty(), desired);
         assertThrows(BackendOperationException.class, transaction::apply);
 
         client.failUserUpdate = false;
@@ -189,6 +210,11 @@ class ElasticsearchBackendTest {
             FakeClient client,
             String principalMode
     ) {
+        return backend(client, principalMode, ElasticsearchReconciliationMode.MANAGED);
+    }
+
+    private static ElasticsearchBackend backend(FakeClient client, String principalMode,
+            ElasticsearchReconciliationMode mode) {
         return new ElasticsearchBackend(
                 "search",
                 new ElasticsearchConfig(
@@ -196,7 +222,7 @@ class ElasticsearchBackendTest {
                         "pact",
                         "secret",
                         null,
-                        principalMode
+                        principalMode, mode, null
                 ),
                 client
         );
@@ -263,6 +289,15 @@ class ElasticsearchBackendTest {
                 new HashMap<>();
         private final Map<String, String> passwordUpdates = new HashMap<>();
         private boolean failUserUpdate;
+        private int writes;
+        private boolean closed;
+
+        @Override public void close() { closed = true; }
+
+        @Override public io.github.pactproject.elasticsearch.api.ElasticsearchPrivileges getPrivileges() {
+            return new io.github.pactproject.elasticsearch.api.ElasticsearchPrivileges(Set.of("monitor", "manage_ilm"),
+                    Set.of("read", "write", "view_index_metadata"));
+        }
 
         @Override
         public JsonNode getRole(String name) {
@@ -278,17 +313,20 @@ class ElasticsearchBackendTest {
 
         @Override
         public void putRole(String name, JsonNode definition) {
+            writes++;
             roles.put(name, definition.deepCopy());
         }
 
         @Override
         public void deleteRole(String name) {
+            writes++;
             roles.remove(name);
         }
 
         @Override
         public void putUser(String username, JsonNode definition)
                 throws ElasticsearchClientException {
+            writes++;
             if (failUserUpdate && !definition.has("password")) {
                 throw new ElasticsearchClientException("deliberate failure");
             }
@@ -306,6 +344,7 @@ class ElasticsearchBackendTest {
 
         @Override
         public void updatePassword(String username, String password) {
+            writes++;
             passwordUpdates.put(username, password);
         }
 
@@ -315,5 +354,167 @@ class ElasticsearchBackendTest {
                     .forEach(role -> result.add(role.asText()));
             return Set.copyOf(result);
         }
+    }
+
+    @Test
+    void closeReleasesClientWithoutChangingRolesOrUsers() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice", "manual"));
+        var backend = backend(client, "require");
+        backend.apply(state(access("alice", "logs-*", "read")));
+        var roles = Map.copyOf(client.roles);
+        var users = Map.copyOf(client.users);
+        int writes = client.writes;
+        backend.close();
+        assertTrue(client.closed);
+        assertEquals(writes, client.writes);
+        assertEquals(roles, client.roles);
+        assertEquals(users, client.users);
+    }
+
+    @Test
+    void clusterPrivilegesAndExistingRolesAreMergedAndRevokedWithoutEditingSharedRoles() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice", "external"));
+        var shared = MAPPER.readTree("{\"cluster\":[\"monitor\"],\"metadata\":{\"owner\":\"ops\"}}");
+        client.roles.put("monitoring_user", shared);
+        var backend = backend(client, "require");
+        var desired = state(access("alice", "logs-*", "read"), cluster("alice", "monitor", "monitoring_user"));
+        var transaction = backend.prepareTransaction(PactState.empty(), desired);
+        assertEquals(0, client.writes, "Preparation must be read-only");
+        transaction.apply();
+        assertEquals(Set.of("external", "monitoring_user", roleName("alice")), client.rolesOf("alice"));
+        assertEquals("monitor", client.roles.get(roleName("alice")).path("cluster").get(0).asText());
+        assertEquals(shared, client.roles.get("monitoring_user"));
+        int writes = client.writes;
+        backend.prepareTransaction(desired, desired).apply();
+        assertEquals(writes, client.writes, "Repeated reconciliation must not write unchanged roles/users");
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertEquals(Set.of("external"), client.rolesOf("alice"));
+        assertEquals(shared, client.roles.get("monitoring_user"));
+    }
+
+    @Test
+    void authoritativeModeRestrictsOnlyDeclaredUsersAndRollbackReappliesEmptyPreviousState() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice", "external", "mixed-cluster-and-index"));
+        client.users.put("bob", user("bob", "external"));
+        client.roles.put("monitoring_user", MAPPER.createObjectNode());
+        var backend = backend(client, "require", ElasticsearchReconciliationMode.AUTHORITATIVE);
+        var desired = state(cluster("alice", null, "monitoring_user"));
+        var tx = backend.prepareTransaction(PactState.empty(), desired);
+        tx.apply();
+        assertEquals(Set.of("monitoring_user"), client.rolesOf("alice"));
+        assertEquals(Set.of("external"), client.rolesOf("bob"));
+        assertFalse(client.roles.containsKey(roleName("alice")), "Roles-only declarations need no empty generated role");
+        tx.rollback();
+        assertEquals(Set.of(), client.rolesOf("alice"));
+        assertEquals(Set.of("external"), client.rolesOf("bob"));
+        backend.prepareTransaction(PactState.empty(), desired).apply();
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertEquals(Set.of(), client.rolesOf("alice"));
+        assertTrue(client.roles.containsKey("monitoring_user"));
+    }
+
+    @Test
+    void rollbackRestoresDeclaredPrivilegesEvenIfApplyDidNotRewriteDriftedRole() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice"));
+        var backend = backend(client, "require", ElasticsearchReconciliationMode.AUTHORITATIVE);
+        var previous = state(access("alice", "logs-*", "read"));
+        backend.prepareTransaction(PactState.empty(), previous).apply();
+        JsonNode expected = client.roles.get(roleName("alice")).deepCopy();
+        var drifted = (ObjectNode) expected.deepCopy();
+        ((ObjectNode) drifted.path("indices").get(0)).putArray("privileges").add("write");
+        client.roles.put(roleName("alice"), drifted);
+        client.users.put("alice", user("alice", roleName("alice"), "external"));
+        var desired = state(access("alice", "logs-*", "write"));
+        var transaction = backend.prepareTransaction(previous, desired);
+        transaction.apply();
+        transaction.rollback();
+        assertEquals(expected, client.roles.get(roleName("alice")));
+        assertEquals(Set.of(roleName("alice")), client.rolesOf("alice"));
+    }
+
+    @Test
+    void identityOnlyCreatesAccountAndNeverResetsItsManualPassword() throws Exception {
+        var client = new FakeClient();
+        var backend = backend(client, "ensure");
+        var desired = state(new Identity("search", "alice", true, null, null, null));
+        var tx = backend.prepareTransaction(PactState.empty(), desired);
+        tx.apply();
+        assertEquals(Set.of(), client.rolesOf("alice"));
+        assertTrue(client.roles.isEmpty());
+        assertTrue(client.passwordsUsedOnCreate.get("alice").length() >= 40);
+        int writes = client.writes;
+        backend.prepareTransaction(desired, desired).apply();
+        assertEquals(writes, client.writes);
+        assertTrue(client.passwordUpdates.isEmpty());
+        tx.rollback();
+        assertNotNull(client.getUser("alice"), "Created accounts outlive rollback");
+    }
+
+    @Test
+    void rejectsAllBadReferencesBeforeWritingAnyUserOrRole() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice"));
+        var backend = backend(client, "ensure");
+        var ensure = new Identity("search", "new-user", true, null, null, null);
+        for (Access bad : Set.of(access("alice", "logs-*", "not_a_privilege"),
+                cluster("alice", "not_a_cluster_privilege"), cluster("alice", null, "missing_role"))) {
+            assertThrows(ValidationException.class, () -> backend.prepareTransaction(PactState.empty(), state(ensure, bad)));
+            assertEquals(0, client.writes);
+            assertFalse(client.users.containsKey("new-user"));
+        }
+        assertThrows(ValidationException.class, () -> backend.prepareTransaction(PactState.empty(),
+                state(new Identity("search", "alice", true, "ns/secret#password", "1", null))));
+        assertEquals(0, client.writes);
+    }
+
+    @Test
+    void rechecksDeletedRoleBeforeAnyWritesAndUnstartedRollbackDoesNothing() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice", "external"));
+        client.roles.put("monitoring_user", MAPPER.createObjectNode());
+        var backend = backend(client, "require");
+        var tx = backend.prepareTransaction(PactState.empty(), state(cluster("alice", "monitor", "monitoring_user")));
+        client.roles.remove("monitoring_user");
+        assertThrows(BackendOperationException.class, tx::apply);
+        tx.rollback();
+        assertEquals(0, client.writes);
+        var unstarted = backend.prepareTransaction(PactState.empty(), state(access("alice", "logs-*", "read")));
+        unstarted.rollback();
+        assertEquals(0, client.writes);
+    }
+
+    @Test
+    void managedRollbackPreservesForeignAssignmentsAddedAfterPrepare() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice", "external"));
+        client.roles.put("monitoring_user", MAPPER.createObjectNode());
+        var tx = backend(client, "require").prepareTransaction(PactState.empty(), state(cluster("alice", "monitor", "monitoring_user")));
+        tx.apply();
+        ((ObjectNode) client.users.get("alice")).withArray("roles").add("concurrent-ops");
+        tx.rollback();
+        assertEquals(Set.of("external", "concurrent-ops"), client.rolesOf("alice"));
+        assertFalse(client.roles.containsKey(roleName("alice")));
+    }
+
+    @Test
+    void rejectsReservedUsersEvenInIdentityOnlyScope() {
+        var client = new FakeClient();
+        var reserved = user("elastic", "superuser");
+        reserved.withObject("/metadata").put("_reserved", true);
+        client.users.put("elastic", reserved);
+        assertThrows(ValidationException.class, () -> backend(client, "ensure").prepareTransaction(PactState.empty(),
+                state(new Identity("search", "elastic", true, null, null, null))));
+        assertEquals(0, client.writes);
+    }
+
+    private static Access cluster(String principal, String privilege, String... roles) {
+        Map<String, Value> attributes = new HashMap<>();
+        if (privilege != null) attributes.put("permissions", Value.object(Map.of("cluster", Value.set(Set.of(Value.string(privilege))))));
+        if (roles.length > 0) attributes.put("roles", Value.set(java.util.Arrays.stream(roles).map(Value::string).collect(java.util.stream.Collectors.toSet())));
+        return new Access(principal, new Resource("search", Map.of("cluster", "*")), attributes);
     }
 }

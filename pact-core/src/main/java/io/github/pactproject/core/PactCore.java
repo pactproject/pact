@@ -17,7 +17,7 @@ import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-public final class PactCore {
+public final class PactCore implements AutoCloseable {
 
     private static final Logger log =
             LoggerFactory.getLogger(PactCore.class);
@@ -25,7 +25,10 @@ public final class PactCore {
     private final Map<String, Backend> backends;
 
     private PactState appliedState = PactState.empty();
+    // Runtime only: preserve every possibly affected scope until apply or rollback succeeds.
+    private final Map<String, Set<PactState>> recoveryStates = new HashMap<>();
     private boolean reconciliationStarted;
+    private boolean closed;
 
     public PactCore(Collection<? extends Backend> backends) {
         this.backends = backends.stream()
@@ -42,6 +45,23 @@ public final class PactCore {
 
     public synchronized void apply(PactState desiredState)
             throws CoreException {
+        if (closed) throw new IllegalStateException("PACT core is closed");
+
+        String reconciliationId = UUID.randomUUID().toString();
+        long started = System.nanoTime();
+        log.info("reconciliation={} phase=reconcile result=started desired_accesses={} desired_identities={}",
+                reconciliationId, desiredState.accesses().size(), desiredState.identities().size());
+        try {
+            applyDesiredState(desiredState, reconciliationId);
+            log.info("reconciliation={} phase=reconcile result=completed duration_ms={}", reconciliationId, elapsedMillis(started));
+        } catch (CoreException | RuntimeException e) {
+            log.error("reconciliation={} phase=reconcile result=failed duration_ms={} recovery_backends={} error_type={}",
+                    reconciliationId, elapsedMillis(started), new TreeSet<>(recoveryStates.keySet()), e.getClass().getSimpleName());
+            throw e;
+        }
+    }
+
+    private void applyDesiredState(PactState desiredState, String reconciliationId) throws CoreException {
 
         reconciliationStarted = true;
         log.debug(
@@ -57,6 +77,7 @@ public final class PactCore {
         var backendIds = new TreeSet<String>();
         backendIds.addAll(previousByBackend.keySet());
         backendIds.addAll(desiredByBackend.keySet());
+        backendIds.addAll(recoveryStates.keySet());
 
         log.debug(
                 "Reconciling backends: {}",
@@ -79,27 +100,39 @@ public final class PactCore {
                             PactState.empty()
                     );
 
-            if (previousState.equals(desiredStateForBackend)) {
+            try {
+                backend(backendId).validateIdentities(desiredStateForBackend.identities());
+            } catch (BackendException e) {
+                throw new ApplyException("Failed to validate backend identities", e);
+            }
+
+            if (previousState.equals(desiredStateForBackend) && !recoveryStates.containsKey(backendId)) {
                 log.debug(
-                        "Backend '{}' is already up to date",
-                        backendId
+                        "reconciliation={} backend={} phase=skip result=unchanged",
+                        reconciliationId, backendId
                 );
                 continue;
             }
 
             try {
+                log.debug("reconciliation={} backend={} phase=prepare previous_accesses={} desired_accesses={} recovery_states={}",
+                        reconciliationId, backendId, previousState.accesses().size(), desiredStateForBackend.accesses().size(),
+                        recoveryStates.getOrDefault(backendId, Set.of()).size());
                 transactions.put(
                         backendId,
-                        backend(backendId).prepare(
+                        phase(reconciliationId, backendId, "prepare", () -> backend(backendId).prepareTransaction(
                                 previousState,
-                                desiredStateForBackend
-                        )
+                                desiredStateForBackend,
+                                recoveryStates.getOrDefault(backendId, Set.of())
+                        ))
                 );
             } catch (BackendException e) {
-                rollback(transactions, e);
                 throw new ApplyException("Failed to prepare desired state", e);
             }
         }
+
+        var startedTransactions =
+                new LinkedHashMap<String, BackendTransaction>();
 
         for (var entry : transactions.entrySet()) {
             var backendId = entry.getKey();
@@ -117,19 +150,26 @@ public final class PactCore {
             );
 
             try {
-                entry.getValue().apply();
+                // Include the failing apply: it may already have written remotely.
+                var possibleStates = new HashSet<>(recoveryStates.getOrDefault(backendId, Set.of()));
+                possibleStates.add(previousByBackend.getOrDefault(backendId, PactState.empty()).withoutSecrets());
+                possibleStates.add(desiredByBackend.getOrDefault(backendId, PactState.empty()).withoutSecrets());
+                recoveryStates.put(backendId, Set.copyOf(possibleStates));
+                startedTransactions.put(backendId, entry.getValue());
+                phase(reconciliationId, backendId, "apply", () -> { entry.getValue().apply(); return null; });
             } catch (BackendException e) {
                 log.warn(
                         "Failed to apply state to backend '{}', rolling back",
                         backendId,
                         e
                 );
-                rollback(transactions, e);
+                rollback(startedTransactions, e, reconciliationId);
                 throw new ApplyException("Failed to apply desired state", e);
             }
         }
 
         appliedState = desiredState.withoutSecrets();
+        startedTransactions.keySet().forEach(recoveryStates::remove);
 
         log.info(
                 "Successfully applied desired state to all backends"
@@ -138,6 +178,7 @@ public final class PactCore {
 
     public synchronized void restoreAppliedState(PactState restoredState)
             throws CoreException {
+        if (closed) throw new IllegalStateException("PACT core is closed");
         if (reconciliationStarted) {
             throw new IllegalStateException(
                     "Applied state can only be restored before reconciliation"
@@ -151,6 +192,21 @@ public final class PactCore {
                 appliedState.accesses().size(),
                 appliedState.identities().size()
         );
+    }
+
+    @Override
+    public synchronized void close() throws CoreException {
+        if (closed) return;
+        closed = true;
+        CoreException failure = null;
+        for (var entry : new TreeMap<>(backends).descendingMap().entrySet()) {
+            try { entry.getValue().close(); }
+            catch (Exception e) {
+                if (failure == null) failure = new CoreException("Failed to close PACT backend clients");
+                failure.addSuppressed(e);
+            }
+        }
+        if (failure != null) throw failure;
     }
 
     private void validateBackends(PactState desiredState)
@@ -182,7 +238,8 @@ public final class PactCore {
 
     private void rollback(
             Map<String, BackendTransaction> transactions,
-            BackendException applyException
+            BackendException applyException,
+            String reconciliationId
     ) throws RollbackException {
 
         if (transactions.isEmpty()) {
@@ -211,7 +268,8 @@ public final class PactCore {
             );
 
             try {
-                entry.getValue().rollback();
+                phase(reconciliationId, backendId, "rollback", () -> { entry.getValue().rollback(); return null; });
+                recoveryStates.remove(backendId);
 
                 log.info(
                         "Successfully rolled back backend '{}'",
@@ -255,6 +313,25 @@ public final class PactCore {
     private Backend backend(String id) {
         return backends.get(id);
     }
+
+    private <T> T phase(String reconciliationId, String backendId, String phase, BackendCall<T> operation)
+            throws BackendException {
+        long started = System.nanoTime();
+        log.info("reconciliation={} backend={} phase={} result=started", reconciliationId, backendId, phase);
+        try {
+            T result = operation.call();
+            log.info("reconciliation={} backend={} phase={} result=completed duration_ms={}",
+                    reconciliationId, backendId, phase, elapsedMillis(started));
+            return result;
+        } catch (BackendException | RuntimeException e) {
+            log.error("reconciliation={} backend={} phase={} result=failed duration_ms={} error_type={}",
+                    reconciliationId, backendId, phase, elapsedMillis(started), e.getClass().getSimpleName());
+            throw e;
+        }
+    }
+
+    private static long elapsedMillis(long started) { return (System.nanoTime() - started) / 1_000_000; }
+    @FunctionalInterface private interface BackendCall<T> { T call() throws BackendException; }
 
     private Map<String, PactState> groupByBackend(
             PactState state

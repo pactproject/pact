@@ -7,13 +7,18 @@
     <parent>
         <groupId>io.github.pactproject</groupId>
         <artifactId>pact</artifactId>
-        <version>1.0.0</version>
+        <version>8</version>
     </parent>
 
     <artifactId>pact-elasticsearch</artifactId>
     <version>1.0.0</version>
 
     <dependencies>
+        <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+            <version>9.2.3</version>
+        </dependency>
         <dependency>
             <groupId>io.github.pactproject</groupId>
             <artifactId>pact-api</artifactId>

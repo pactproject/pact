@@ -190,7 +190,12 @@ A `403` indicates an authorization problem, not a reason to switch API profiles.
 A service account can be created successfully before its permission request
 fails, so inspect the failed endpoint and the nested HTTP error.
 
-Desired user/repository references are validated before permission writes.
+Preparation compiles and resolves desired references read-only, before core
+applies any backend. No accounts or permissions are created in preparation.
+Apply reloads actual state and rechecks references before permission writes,
+because successful preparation cannot prevent concurrent catalog changes.
+Explicit identities fail with a checked not-implemented validation error;
+access-driven creation of absent `svc-*` service accounts remains supported.
 Reconciliation retains the normal PACT transaction model: `pact-core` invokes
 compensation after a failure, and this backend restores the previous desired
 grants through the same profile. Compensation does not delete created accounts
@@ -208,6 +213,29 @@ explicit generic target UUIDs directly. Current-profile requests also carry
 `conditions: {allowed_cidrs: [...]}` when configured; this is the server's JSON
 contract, while PACT declarations use the flat `allowed_cidrs` attribute. Local
 HTTP contract tests protect these shapes.
+
+Each application uses its own immutable actual-state catalog and a local cache
+for newly ensured service accounts; the backend retains no mutable working state
+between calls. Catalog reads reject repeated IDs, inconsistent totals, empty
+intermediate pages and failed/malformed later pages before mutations. Projects
+use the server's unpaged contract and reject an advertised incomplete result.
+
+One logical HTTP request, including all `429` attempts and waits, has a 30-second
+budget. At most three retries are allowed, with waits no longer than five seconds
+each. A larger server-requested delay fails immediately rather than retrying
+early. HTTP-date/ISO `Retry-After`, seconds and `X-RateLimit-Reset` are handled;
+interruption is propagated and lost-response writes are not blindly retried.
+See [DIAGNOSTICS.md](../DIAGNOSTICS.md) for logging requirements.
+
+Unknown configuration keys fail initialization. Use the documented `url`,
+`token`, `per-page` and `api-profile` keys; previously ignored misspellings must
+be corrected before upgrading.
+
+The [shared test contract and coverage map](../TESTING.md) links the compiler,
+resolver, adapter, transaction and enforcement tests and records remaining gaps.
+Adapter errors retain HTTP status, operation and sanitized server/parser details.
+Passwords and authentication material are masked; users, resources and permissions
+remain available for diagnosis.
 
 CI and opt-in live tests cover Artifact Keeper 1.11.1,
 including service-account creation, repeated reconciliation, grant revocation,

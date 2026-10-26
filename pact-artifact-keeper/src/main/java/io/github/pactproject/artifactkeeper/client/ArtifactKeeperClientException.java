@@ -1,6 +1,6 @@
 package io.github.pactproject.artifactkeeper.client;
 
-public class ArtifactKeeperClientException extends Throwable {
+public class ArtifactKeeperClientException extends Exception {
     public ArtifactKeeperClientException(String s, Throwable e) {
         super(s, e);
     }
