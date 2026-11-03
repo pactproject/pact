@@ -45,6 +45,71 @@ hierarchy and the keys of `permissions` are levels of that path:
 - A privilege on the wrong level (for example `SELECT` on `database`) fails
   validation.
 
+## Object ownership
+
+Ownership is opt-in and requires `reconciliation-mode: authoritative` with a
+superuser connection. Without `ownership`, PACT does not change an object's
+owner. Declare the owning role through `users` (filesystem: `principal`) and
+list the concrete target levels to own:
+
+```yaml
+resources:
+  - application-db:
+      database: appdb
+      schema: app_data
+      table: orders
+    access:
+      - users: [app_owner]
+        ownership: [schema, table]
+      - users: [app_runtime]
+        permissions:
+          schema: [USAGE]
+          table: [SELECT, INSERT, UPDATE, DELETE]
+```
+
+Filesystem input uses `attributes.ownership: [schema, table]` with the same
+target hierarchy. Ownership needs no `permissions` entry. The usual database
+ACL reconciliation scope still applies: an ownership-only declaration is not
+an ACL-preserving patch. Include all required grants in desired state.
+
+Supported levels are `database`, `schema`, `table`, `sequence`, `function` and
+`procedure`; columns have no separate owner. Objects must already exist and
+targets remain exact, without wildcards or recursive schema/database adoption.
+Functions/procedures use exact argument signatures; aggregates are unsupported
+ownership targets. System schemas are outside ownership scope. Roles must exist
+or be explicitly ensured through identities; existing NOLOGIN roles are valid.
+PACT neither creates objects nor implicitly creates owner roles. Multiple owners
+for the same canonical object fail before writes, including conflicts produced
+by multiple DataAccess resources or routine argument aliases.
+
+Removing the final ownership declaration leaves the current owner in place,
+including removal of the whole resource or an empty desired state. No fallback
+owner (including `postgres`) is chosen. Ownership of newly created children is
+not periodically rewritten. Native dependencies still apply: changing a table
+owner also transfers its owned serial/identity sequences. Conflicting explicit
+sequence/table owners fail before writes; unrelated objects remain unchanged.
+For SECURITY DEFINER routines, assigning an owner changes execution authority.
+
+Preparation validates ownership targets, owner roles and sequence dependencies
+read-only across all desired databases before identity writes. Apply ensures
+identities, changes owners, then computes creator-derived defaults and reconciles
+ACLs in the same transaction per database. `defaultPrivileges.creator` is never
+changed implicitly. Repeated matching ownership is a no-op. As with ACLs, use a
+single writer for overlapping object scopes; catalogs and preparation do not
+prevent concurrent DDL, and connections use the configured JDBC timeout options.
+
+When revoking a recorded grantor's object ACL without schema USAGE, the adapter
+grants that grantor temporary schema USAGE inside the database transaction and
+revokes it before commit. No extra schema access is retained.
+
+Compensation reapplies owners explicitly present in the previous agreed
+declaration. If ownership was previously unspecified, a committed first owner
+assignment remains in place after compensation; no original-owner snapshot is
+stored. This also applies after a lost commit response. Per-database transaction
+failure rolls back uncommitted DDL, but cross-database restoration is best effort.
+On startup PACT reconciles the current declaration within recoverable scope;
+it does not reconstruct unknown old owners or resume an interrupted rollback.
+
 ## Default privileges
 
 Use `defaultPrivileges` on a database-and-schema target instead of a wildcard.
@@ -318,8 +383,9 @@ Rules:
   for its own connection to PostgreSQL.
 - `Resource.backendId` selects the configured PostgreSQL connection.
 - PACT declarations do not express `WITH GRANT OPTION`; authoritative mode
-  removes it from managed grants. Role membership, object ownership,
-  and row-level security remain out of scope. `defaultPrivileges` manages
+  removes it from managed grants. Role membership and row-level security remain
+  out of scope. Object ownership changes only through explicit `ownership`.
+  `defaultPrivileges` manages
   creator/schema-scoped native default ACLs as described above.
 - Privilege names are case-insensitive; unknown privilege or target names
   fail validation rather than being interpolated into SQL.
@@ -344,9 +410,9 @@ PostgreSQL's global defaults for future objects. Creator/schema-scoped
 functions and procedures.
 
 Explicit identities now default to `ensure: true`; use `ensure: false` when
-accounts must pre-exist. A config/default change alone does not force core to
-reconcile an equal restored state; verify a new reconciliation with complete
-desired declarations before relying on the new mode.
+accounts must pre-exist. Startup reconciles even an equal restored state, so
+provide complete desired declarations before restarting with a new mode.
+Later equal declarations are skipped within the same process.
 
 `reconciliation-mode: grantor` preserves the original behavior. PACT reads and
 reconciles only direct ACL entries issued by the configured login, excluding
@@ -366,12 +432,13 @@ requires a revoke to run as the grantor recorded on that ACL, so PACT temporaril
 grant-option dependencies are then restored only when present in the desired
 state. Object-owner privileges are not revoked.
 
-Authoritative mode does not manage role membership, object ownership,
+Authoritative mode does not manage role membership,
 row-level security, or database/schema/object
 creation. Those paths can still confer access independently of the direct ACLs
 PACT reconciles. PACT also reconciles only databases named by the previous or
 desired state; ensure every database to be managed is represented in that
-state. Use a complete desired state and pilot the mode before enabling it on a
+state. Object owners change only when explicitly declared through `ownership`.
+Use a complete desired state and pilot the mode before enabling it on a
 production scope.
 
 ## Provisioning the grant-manager login
@@ -668,3 +735,12 @@ revocation of undeclared built-in PUBLIC privileges. Run it only against a dispo
 cluster with a test login that has `CREATEDB` and `CREATEROLE`; see
 [`INTEGRATION_TESTS.md`](../INTEGRATION_TESTS.md). The local Compose `tests`
 profile runs this test against its disposable PostgreSQL service.
+
+`JdbcOwnershipTest` covers exact/canonical reference validation, catalog errors,
+quoting and no-op behavior. `PostgreSqlOwnershipLiveIntegrationTest` exercises
+both declaration providers through core on PostgreSQL 18, verifies real owner
+DDL and SECURITY DEFINER execution, owned sequences, unrelated/partition child
+boundaries, idempotency, final-owner defaults, preflight failures, lost commit
+responses, compensation across databases and startup reapplication. It is part
+of the backend live runner. These tests do not establish concurrent-DDL safety,
+foreign-table ownership or hard-kill recovery of a running JVM.

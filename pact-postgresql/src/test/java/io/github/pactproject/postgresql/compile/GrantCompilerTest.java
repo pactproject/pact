@@ -9,6 +9,7 @@ import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeType;
 import io.github.pactproject.postgresql.model.Grant;
+import io.github.pactproject.postgresql.model.Ownership;
 import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.RoutineSignature;
 import io.github.pactproject.postgresql.model.Privilege;
@@ -22,6 +23,37 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class GrantCompilerTest {
+    @Test
+    void compilesExplicitOwnershipLevelsIndependentlyOfPermissions() {
+        var access = new Access("owner", new Resource("postgres", Map.of(
+                "database", "app", "schema", "sales", "table", "orders", "sequence", "free_seq")),
+                Map.of("ownership", Value.set(Set.of(Value.string("schema"), Value.string("table"),
+                        Value.string("sequence")))));
+        var compiled = GrantCompiler.compileState(state(access), "postgres");
+        assertEquals(Set.of(new Ownership(new GrantTarget("app", "sales", null, null), "owner"),
+                new Ownership(new GrantTarget("app", "sales", "orders", null), "owner"),
+                new Ownership(new GrantTarget("app", "sales", null, null, "free_seq"), "owner")),
+                compiled.ownerships());
+        assertEquals(Set.of(), compiled.grants());
+        assertEquals(Set.of(), GrantCompiler.compileState(PactState.empty(), "postgres").ownerships());
+    }
+
+    @Test
+    void rejectsConflictingOwnersAndUnsupportedOwnershipBeforeWrites() {
+        var resource = new Resource("postgres", Map.of("database", "app", "schema", "sales", "table", "orders"));
+        Map<String, Value> attributes = Map.of("ownership", Value.set(Set.of(Value.string("table"))));
+        var a = new Access("a", resource, attributes);
+        var b = new Access("b", resource, attributes);
+        assertThrows(IllegalArgumentException.class, () -> GrantCompiler.compileState(state(a, b), "postgres"));
+        assertThrows(IllegalArgumentException.class, () -> GrantCompiler.compileState(
+                state(new Access("PUBLIC", resource, attributes)), "postgres"));
+        for (Value invalid : Set.of(Value.string("table"), Value.set(Set.of()),
+                Value.set(Set.of(Value.string("column"))), Value.set(Set.of(Value.string("unknown"))))) {
+            assertThrows(IllegalArgumentException.class, () -> GrantCompiler.compileState(
+                    state(new Access("owner", resource, Map.of("ownership", invalid))), "postgres"));
+        }
+    }
+
     @Test
     void compilesDatabaseGrantsAndNormalizesPrivilegeNames() {
         PactState state = state(access(

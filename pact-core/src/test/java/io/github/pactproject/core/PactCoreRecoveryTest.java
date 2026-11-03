@@ -10,6 +10,49 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PactCoreRecoveryTest {
+    @Test
+    void newCoreRepairsPartialWritesInRestoredScopeEvenWhenSourceWasReverted() throws Exception {
+        var backend = new ScopedBackend("db");
+        var previous = state(access("db", "a"));
+        var first = new PactCore(List.of(backend));
+        first.apply(previous);
+        // A process dies after changing remote state but before recording success.
+        backend.actual.clear();
+        backend.actual.add(new Access("bob", new Resource("db", Map.of("database", "a")), Map.of()));
+        backend.actual.add(access("db", "outside"));
+
+        var restarted = new PactCore(List.of(backend));
+        restarted.restoreAppliedState(previous);
+        restarted.apply(previous);
+
+        assertEquals(Set.of(access("db", "a"), access("db", "outside")), backend.actual);
+        assertTrue(backend.lastRecovery.isEmpty(), "Restart must not pretend to restore runtime recovery history");
+        assertEquals(2, backend.applies);
+        restarted.apply(previous);
+        assertEquals(2, backend.applies);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"prepare", "apply"})
+    void failedStartupIsRetriedEvenWhenCompensationSucceeded(String phase) throws Exception {
+        var backend = new ScopedBackend("db");
+        var previous = state(access("db", "a"));
+        var core = new PactCore(List.of(backend));
+        core.restoreAppliedState(previous);
+        backend.failPrepare = phase.equals("prepare");
+        backend.failApply = phase.equals("apply");
+
+        assertThrows(ApplyException.class, () -> core.apply(previous));
+        backend.failPrepare = false;
+        int appliesBeforeRetry = backend.applies;
+        core.apply(previous);
+
+        assertEquals(appliesBeforeRetry + 1, backend.applies);
+        assertEquals(previous.accesses(), backend.actual);
+        core.apply(previous);
+        assertEquals(appliesBeforeRetry + 1, backend.applies);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"a", "c", "empty"})
     void failedRollbackForcesCurrentSourceStateAndCleansEveryAttemptedScope(String target) throws Exception {

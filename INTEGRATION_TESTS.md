@@ -1,5 +1,32 @@
 # PACT integration tests
 
+## Focused Grafana live tests
+
+Use the standalone disposable Grafana 13.3.0 Compose fixture. It uses a separate
+project and no persistent/shared volumes, and binds only to localhost:
+
+```powershell
+docker compose -p pact-grafana-it -f integration/compose.grafana.yaml up -d --wait
+$env:PACT_IT_GRAFANA_DISPOSABLE = 'true'
+$env:PACT_IT_GRAFANA_URL = 'http://127.0.0.1:33080'
+mvn -B -pl pact-grafana -am test -Dpact.integration=true -Dtest=GrafanaLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false
+docker compose -p pact-grafana-it -f integration/compose.grafana.yaml down
+```
+
+Run Maven with JDK 21. Change `PACT_IT_GRAFANA_PORT` when the default port is
+occupied and set the matching test URL. Never set the disposable marker for a
+shared Grafana. The runner creates uniquely named users, a service account,
+folders and dashboards as fixture setup, then removes only those IDs. User
+creation is not a plugin capability; fixtures stand in for users already
+registered through OIDC. No OIDC login/linking is tested.
+
+The suite exercises real search pagination with page size one, names and UIDs,
+filesystem and Kubernetes compilation through core, dashboard read and edit
+enforcement, unrelated-object denial, inherited folder access, empty-state
+revocation, and compensation/retry after an injected client-boundary error
+following a successful real ACL write. This focused suite does not run the
+other backend or Kubernetes API live environments described below.
+
 The shared requirements, test inventory and coverage limits are in
 [TESTING.md](TESTING.md). A default Maven pass skips the opt-in live suites;
 report executed service/profile versions separately from source coverage.
@@ -32,6 +59,11 @@ resources:
   The cross-database recovery scenario creates two temporary databases and
   injects failure at the client boundary after a real JDBC commit, then checks
   restoration of the previous declaration and successful retry.
+  `PostgreSqlOwnershipLiveIntegrationTest` also verifies explicit owners through
+  both provider formats, dependent sequences, native DDL/SECURITY DEFINER,
+  final-owner default ACLs, cross-database compensation, retained first
+  assignments and startup reconciliation on PostgreSQL 18. It uses the same
+  disposable PostgreSQL environment variables and is included in the backend runner.
 - A disposable Elasticsearch 9.2.3 cluster with Security API administration
   credentials. Live tests create unique native users, custom roles and indices
   with test documents. They verify actual read/write and cluster authorization,
@@ -40,6 +72,11 @@ resources:
   removes only their uniquely generated users, roles and indices.
   `docker compose down -v` removes the dedicated local Elasticsearch data
   volume.
+- A disposable Grafana 13.3.0 instance. Its tests create unique users, an Admin
+  service account/token, folders and dashboards, and remove only those fixture
+  IDs. The main Compose `tests` profile includes this service and the backend
+  live runner includes `GrafanaLiveIntegrationTest`. The standalone command
+  above is useful when the other backend services are not needed.
 
 The Ranger test compensates through its previous declared managed-policy states; the
 Artifact Keeper test returns its dedicated instance to the initially empty

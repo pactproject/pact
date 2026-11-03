@@ -1,0 +1,41 @@
+name: Grafana integration
+
+on:
+  pull_request:
+    paths: ["pact-grafana/**", "pact-api/**", "pact-core/**", "pact-filesystem/**", "pact-kubernetes/**", "pom.xml", "integration/compose.grafana.yaml", ".github/workflows/grafana-integration.yml"]
+  push:
+    branches: [master]
+    paths: ["pact-grafana/**", "pact-api/**", "pact-core/**", "pact-filesystem/**", "pact-kubernetes/**", "pom.xml", "integration/compose.grafana.yaml", ".github/workflows/grafana-integration.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  permissions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Start disposable Grafana 13.3.0
+        run: docker compose -p pact-grafana-it -f integration/compose.grafana.yaml up -d --wait
+      - name: Verify native access and compensation
+        env:
+          PACT_IT_GRAFANA_DISPOSABLE: "true"
+          PACT_IT_GRAFANA_URL: http://127.0.0.1:33080
+        run: mvn -B -pl pact-grafana -am test -Dpact.integration=true '-Dtest=Grafana*Test' -Dsurefire.failIfNoSpecifiedTests=false
+      - name: Verify test contract references
+        run: python3 integration/scripts/check-test-contract.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: grafana-test-reports
+          path: pact-grafana/target/surefire-reports/
+      - name: Remove disposable Grafana
+        if: always()
+        run: docker compose -p pact-grafana-it -f integration/compose.grafana.yaml down

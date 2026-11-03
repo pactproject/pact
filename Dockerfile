@@ -7,7 +7,7 @@ RUN mvn -B install
 
 RUN set -eu; \
     mkdir -p /dist/lib /dist/plugins; \
-    for module in pact-app pact-filesystem pact-kubernetes pact-ranger pact-artifact-keeper pact-postgresql pact-elasticsearch; do \
+    for module in pact-app pact-filesystem pact-kubernetes pact-ranger pact-artifact-keeper pact-postgresql pact-elasticsearch pact-grafana; do \
       mvn -B -f "${module}/pom.xml" \
         org.apache.maven.plugins:maven-dependency-plugin:3.7.1:copy-dependencies \
         -DincludeScope=runtime \
@@ -21,7 +21,8 @@ RUN set -eu; \
     cp pact-ranger/target/pact-ranger-*.jar /dist/plugins/; \
     cp pact-artifact-keeper/target/pact-artifact-keeper-*.jar /dist/plugins/; \
     cp pact-postgresql/target/pact-postgresql-*.jar /dist/plugins/; \
-    cp pact-elasticsearch/target/pact-elasticsearch-*.jar /dist/plugins/
+    cp pact-elasticsearch/target/pact-elasticsearch-*.jar /dist/plugins/; \
+    cp pact-grafana/target/pact-grafana-*.jar /dist/plugins/
 
 FROM eclipse-temurin:21-jre
 

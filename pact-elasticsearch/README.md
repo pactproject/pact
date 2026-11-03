@@ -134,8 +134,9 @@ For migration from the previous managed default, explicitly set
 default, first declare every role assignment needed by in-scope users,
 including identity-only users. Shared role definitions remain unchanged;
 undeclared memberships are removed. Keep the connecting administrator out of
-this scope. Config changes alone do not force core to reapply equal restored
-state; verify a new reconciliation against a complete declaration.
+this scope. Startup reapplies equal restored state; verify that the current
+declaration is complete before restarting with a new mode. Later equal state
+is skipped within the same process.
 
 ## Account passwords and compensation
 
@@ -180,7 +181,8 @@ restart. Incomplete built-in privilege catalogs fail before writes. See
 
 See the [shared test contract and coverage map](../TESTING.md) for required
 backend scenarios and the limits of current evidence. Foreign backend IDs are
-rejected; unchanged declarative state is skipped by core even after external drift.
+rejected; after successful startup reconciliation, unchanged declarative state
+is skipped by core even after external drift.
 
 ```powershell
 mvn -B -pl pact-elasticsearch -am test

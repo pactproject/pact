@@ -13,7 +13,7 @@ RUN mvn -B -DskipTests install
 
 RUN set -eu; \
     mkdir -p /opt/pact/lib /opt/pact/plugins; \
-    for module in pact-app pact-filesystem pact-ranger pact-artifact-keeper pact-postgresql pact-elasticsearch; do \
+    for module in pact-app pact-filesystem pact-ranger pact-artifact-keeper pact-postgresql pact-elasticsearch pact-grafana; do \
       mvn -B -f "${module}/pom.xml" \
         org.apache.maven.plugins:maven-dependency-plugin:3.7.1:copy-dependencies \
         -DincludeScope=runtime \
@@ -27,6 +27,7 @@ RUN set -eu; \
     cp pact-artifact-keeper/target/pact-artifact-keeper-*.jar /opt/pact/plugins/; \
     cp pact-postgresql/target/pact-postgresql-*.jar /opt/pact/plugins/; \
     cp pact-elasticsearch/target/pact-elasticsearch-*.jar /opt/pact/plugins/; \
+    cp pact-grafana/target/pact-grafana-*.jar /opt/pact/plugins/; \
     mkdir -p /home/pact/.m2; \
     cp -a /root/.m2/repository /home/pact/.m2/; \
     chown -R 10001:10001 /workspace /opt/pact /home/pact

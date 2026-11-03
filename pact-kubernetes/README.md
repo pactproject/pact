@@ -120,9 +120,16 @@ resources:
 
 ## Controller behavior
 
-- Startup lists all `DataAccess` resources and rebuilds applied state only from
-  `status.lastAppliedSpec`; it then starts the informer and waits for its cache
-  to sync before processing events.
+- Startup lists all `DataAccess` resources and rebuilds previous applied state
+  from `status.lastAppliedSpec`. It then validates and applies the complete
+  aggregate of current active specs, excluding deleting resources, before
+  starting the informer. Core reconciles backends from current or restored
+  state even when equal; unused configured backends remain untouched. Finalizers
+  are installed before backend writes. Invalid startup input or a failed startup
+  reconciliation prevents startup without advancing successful status snapshots.
+- Startup reconciliation repairs only scopes recoverable from current/restored
+  declarations and backend configuration. Attempted scopes known only to the
+  previous process are lost; interrupted compensation is not resumed.
 - Add and changed-generation update events are processed in FIFO order. Updates
   that do not change `metadata.generation` are ignored. A deletion timestamp
   takes priority over generation checks; status-only updates produced while
@@ -208,6 +215,7 @@ The opt-in `KubernetesArtifactKeeperLiveIntegrationTest` uses a real isolated
 Kubernetes API and Artifact Keeper 1.11.1. It covers named subjects/objects,
 mixed users and service accounts, arbitrary backend IDs, flat CIDRs, status
 persistence, updates and finalizer cleanup. A second scenario starts two
-separate controller JVMs and verifies restart restores applied state without
-rewriting permissions. Run it using the `kubernetes` Compose profile described
+separate controller JVMs and verifies restart restores and reconciles applied
+state without rewriting already matching permissions. This is a graceful
+restart test, not a hard-kill test during reconciliation. Run it using the `kubernetes` Compose profile described
 in [INTEGRATION_TESTS.md](../INTEGRATION_TESTS.md).

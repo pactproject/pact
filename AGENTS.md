@@ -98,11 +98,14 @@ These instructions cover both new backends and changes to existing plugins.
   compatibility and unknown fields in the CRD when extending declarations.
   Removing one declaration must retain access still requested by another.
 - Core groups both accesses and identities by backend ID, rejects unknown IDs,
-  and skips equal previous/desired states. Only IDs present in previous or
-  desired state or retained recovery scope participate; an unused configured backend is not sent an empty
-  state at startup. There is no unconditional external-drift repair on an
-  unchanged declaration. Successful transitions retain secret-free applied
-  state; failed transitions do not advance it. Restore is startup-only.
+  and skips equal previous/desired states after a successful startup reconciliation.
+  The startup pass reapplies the current source declaration for every participating
+  backend even when it equals restored state; restoration itself remains read-only.
+  Only IDs present in previous or desired state or retained recovery scope
+  participate; an unused configured backend is not sent an empty state at startup.
+  There is no periodic unconditional external-drift repair on an unchanged
+  declaration. Successful transitions retain secret-free applied state; failed
+  transitions do not advance it. Restore is startup-only.
 
 ## Designing and implementing a backend
 
@@ -164,7 +167,8 @@ Implementation rules:
   declaration even if it equals the previous agreed state or is empty. Core
   retains secret-free states from every uncertain transition as cleanup scope;
   do not replace the desired target with those states or merge their grants into
-  desired permissions. Only failed compensation overrides the equality shortcut.
+  desired permissions. After successful startup reconciliation, only failed
+  compensation overrides the equality shortcut.
 - `prepareTransaction(previous, desired, recoveryStates)` must remain read-only
   and retain recovery scopes for both application and its compensation. The API
   default explicitly rejects non-empty recovery scopes unless a plugin supports
@@ -174,6 +178,14 @@ Implementation rules:
   Kubernetes status or persisted for filesystem runs; process restart loses it.
   Successful application or compensation clears the relevant context. Never
   claim restart recovery of failed compensation without implementing persistence.
+- Startup recovery reconciles the current declaration, rather than resuming an
+  interrupted rollback. Kubernetes applies the full aggregate of current active
+  specs before informer events, using successful status snapshots as previous
+  state. Failed startup reconciliation must be retried even if state is equal.
+  Repair is limited to scopes recoverable from current/restored declarations and
+  backend configuration; attempted scopes or original object owners known only
+  to a lost process cannot be reconstructed. Do not claim complete crash recovery
+  or introduce a dependency on in-memory snapshots for restart correctness.
 - Retain `Backend.prepareTransaction(previous, desired)` and `BackendTransaction` with
   `apply()` / `rollback()` as the plugin contract. Core decides when to apply
   and compensate, maintains the previous successful state, and controls order.
@@ -280,6 +292,18 @@ Implementation rules:
 
 ### PostgreSQL
 
+- Object ownership is opt-in through `access.ownership: [schema, table, ...]`
+  (filesystem: `attributes.ownership`); the principal is the owner. Without an
+  explicit constraint, do not change ownership or choose a default/fallback role.
+  Removing the final ownership declaration stops managing the owner and leaves
+  it in place. No recursive adoption of schema/database children is implied;
+  native owned-sequence dependencies still apply. Resolve canonical objects,
+  roles and ownership conflicts before identity writes. Ownership requires
+  authoritative mode and is applied before default-derived grants and ACLs.
+  Compensation restores only explicitly declared previous owners. A committed
+  first assignment survives compensation when no previous owner was declared;
+  do not save or depend on an original-owner snapshot. Startup reapplies current
+  explicit constraints within recoverable scope, not unknown original owners.
 - Preserve database/schema/table/column and sibling sequence/function/procedure
   targets. Names are exact; wildcards are unsupported. Routine references need
   exact argument signatures, including `()`; resolve overloads through catalogs.

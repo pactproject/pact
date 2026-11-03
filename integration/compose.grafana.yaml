@@ -1,0 +1,17 @@
+# Standalone disposable Grafana fixture. Never point its test runner at a shared server.
+services:
+  grafana:
+    image: grafana/grafana:13.3.0
+    ports:
+      - "127.0.0.1:${PACT_IT_GRAFANA_PORT:-33080}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: pact-fixture-admin
+      GF_SECURITY_ADMIN_PASSWORD: pact-disposable-grafana
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_LOG_LEVEL: warn
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 60

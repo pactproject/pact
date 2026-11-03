@@ -15,6 +15,7 @@ import io.github.pactproject.postgresql.model.DefaultPrivilegeGrant;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.Grant;
+import io.github.pactproject.postgresql.model.Ownership;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -94,6 +95,9 @@ public final class PostgreSqlBackend implements Backend {
                 Set.copyOf(defaultScopes);
         Set<Grant> observedGrants;
         try {
+            client.validateOwnerships(desired.ownerships(), desiredIdentities.stream()
+                    .filter(Identity::ensure).map(Identity::principal)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet()));
             observedGrants = client.getManagedGrants(scope);
             client.getManagedDefaultPrivileges(
                     transitionDefaultScopes
@@ -117,8 +121,8 @@ public final class PostgreSqlBackend implements Backend {
         );
         Set<DefaultPrivilegeOverride> defaultOverrides =
                 desired.defaultPrivilegeOverrides();
-        log.debug("backend={} phase=prepare databases={} desired_grants={} desired_defaults={} cleanup_default_scopes={}",
-                id, scope, desiredGrants, desired.defaultPrivileges(), transitionDefaultScopes);
+        log.debug("backend={} phase=prepare databases={} desired_grants={} desired_defaults={} desired_ownerships={} cleanup_default_scopes={}",
+                id, scope, desiredGrants, desired.defaultPrivileges(), desired.ownerships(), transitionDefaultScopes);
         return new BackendTransaction() {
             @Override
             public void apply() throws BackendException {
@@ -142,6 +146,7 @@ public final class PostgreSqlBackend implements Backend {
                         desired.defaultPrivileges(),
                         transitionDefaultScopes,
                         defaultOverrides,
+                        desired.ownerships(),
                         "apply"
                 );
                 log.info("Reconciled PostgreSQL backend '{}'", id);
@@ -162,6 +167,7 @@ public final class PostgreSqlBackend implements Backend {
                         previous.defaultPrivileges(),
                         transitionDefaultScopes,
                         previous.defaultPrivilegeOverrides(),
+                        previous.ownerships(),
                         "rollback"
                 );
                 log.info("Rolled back PostgreSQL grants for backend '{}'", id);
@@ -219,12 +225,14 @@ public final class PostgreSqlBackend implements Backend {
             Set<DefaultPrivilegeGrant> defaults,
             Set<DefaultPrivilegeScope> defaultScopes,
             Set<DefaultPrivilegeOverride> overrides,
+            Set<Ownership> ownerships,
             String operation
     ) throws BackendException {
-        log.debug("backend={} phase={} databases={} target_grants={} target_defaults={}", id, operation, databases, desired, defaults);
+        log.debug("backend={} phase={} databases={} target_grants={} target_defaults={} target_ownerships={}",
+                id, operation, databases, desired, defaults, ownerships);
         try {
             client.synchronize(
-                    databases, desired, defaults, defaultScopes, overrides
+                    databases, desired, defaults, defaultScopes, overrides, ownerships
             );
         }
         catch (PostgreSqlClientException e) {

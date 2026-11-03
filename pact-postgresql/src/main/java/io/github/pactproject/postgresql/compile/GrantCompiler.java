@@ -11,6 +11,7 @@ import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeType;
 import io.github.pactproject.postgresql.model.Grant;
+import io.github.pactproject.postgresql.model.Ownership;
 import io.github.pactproject.postgresql.model.GrantLevel;
 import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.Privilege;
@@ -40,6 +41,7 @@ public final class GrantCompiler {
         Set<DefaultPrivilegeGrant> defaultPrivileges = new HashSet<>();
         Set<DefaultPrivilegeScope> defaultScopes = new HashSet<>();
         Set<DefaultPrivilegeOverride> overrides = new HashSet<>();
+        Map<GrantTarget, String> owners = new java.util.HashMap<>();
 
         for (Access access : state.accesses()) {
             GrantTarget target = target(access, backendId);
@@ -50,10 +52,30 @@ public final class GrantCompiler {
             }
             for (String attribute : access.attributes().keySet()) {
                 if (!"permissions".equals(attribute)
-                        && !"defaultPrivileges".equals(attribute)) {
+                        && !"defaultPrivileges".equals(attribute)
+                        && !"ownership".equals(attribute)) {
                     throw new IllegalArgumentException(
                             "Unsupported PostgreSQL access field: " + attribute
                     );
+                }
+            }
+
+            Value ownershipValue = access.attributes().get("ownership");
+            if (ownershipValue != null) {
+                if (!(ownershipValue instanceof SetValue levels) || levels.values().isEmpty()) {
+                    throw new IllegalArgumentException("PostgreSQL ownership must be a non-empty set of levels");
+                }
+                for (Value value : levels.values()) {
+                    if (!(value instanceof StringValue name)) {
+                        throw new IllegalArgumentException("PostgreSQL ownership must contain level names");
+                    }
+                    GrantLevel level = GrantLevel.fromKey(name.value()).orElseThrow(
+                            () -> new IllegalArgumentException("Unsupported PostgreSQL ownership level: " + name.value()));
+                    Ownership ownership = new Ownership(target.pathTo(level), access.principal());
+                    String previous = owners.putIfAbsent(ownership.target(), ownership.role());
+                    if (previous != null && !previous.equals(ownership.role())) {
+                        throw new IllegalArgumentException("Conflicting PostgreSQL owners for " + ownership.target());
+                    }
                 }
             }
 
@@ -123,7 +145,9 @@ public final class GrantCompiler {
                 grants,
                 defaultPrivileges,
                 defaultScopes,
-                overrides
+                overrides,
+                owners.entrySet().stream().map(entry -> new Ownership(entry.getKey(), entry.getValue()))
+                        .collect(java.util.stream.Collectors.toUnmodifiableSet())
         );
     }
 

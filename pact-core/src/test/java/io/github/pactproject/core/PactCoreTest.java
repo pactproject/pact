@@ -174,7 +174,7 @@ class PactCoreTest {
     }
 
     @Test
-    void restoresAppliedStateWithoutApplyingItAgain() throws Exception {
+    void reconcilesRestoredStateOnceAtStartupThenSkipsEqualDeclarations() throws Exception {
         var backend = new TestBackend("test");
         var core = new PactCore(List.of(backend));
         var restoredState = state(
@@ -182,9 +182,48 @@ class PactCoreTest {
         );
 
         core.restoreAppliedState(restoredState);
+        assertEquals(0, backend.applyCount(), "Restoration itself must be read-only");
+        core.apply(restoredState);
         core.apply(restoredState);
 
-        assertEquals(0, backend.applyCount());
+        assertEquals(1, backend.applyCount());
+        assertEquals(restoredState, backend.currentState());
+    }
+
+    @Test
+    void startupReconcilesUnchangedChangedAndRemovedBackendsButNotUnusedOnes() throws Exception {
+        var unchanged = new TestBackend("unchanged");
+        var changed = new TestBackend("changed");
+        var removed = new TestBackend("removed");
+        var unused = new TestBackend("unused");
+        var core = new PactCore(List.of(unchanged, changed, removed, unused));
+        var stable = access("alice", "unchanged", "table", "events");
+        core.restoreAppliedState(state(stable,
+                access("alice", "changed", "table", "old"),
+                access("alice", "removed", "table", "old")));
+        var desired = state(stable, access("bob", "changed", "table", "new"));
+
+        core.apply(desired);
+        core.apply(desired);
+
+        assertEquals(state(stable), unchanged.currentState());
+        assertEquals(state(access("bob", "changed", "table", "new")), changed.currentState());
+        assertEquals(PactState.empty(), removed.currentState());
+        assertEquals(1, unchanged.applyCount());
+        assertEquals(1, changed.applyCount());
+        assertEquals(1, removed.applyCount());
+        assertEquals(0, unused.applyCount());
+    }
+
+    @Test
+    void emptyStartupDoesNotApplyUnusedConfiguredBackends() throws Exception {
+        var unused = new TestBackend("unused");
+        var core = new PactCore(List.of(unused));
+
+        core.restoreAppliedState(PactState.empty());
+        core.apply(PactState.empty());
+
+        assertEquals(0, unused.applyCount());
     }
 
     @Test
