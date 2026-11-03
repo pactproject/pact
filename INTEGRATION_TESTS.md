@@ -259,6 +259,9 @@ The bootstrap creates the dedicated Ranger HDFS service and Artifact Keeper
 test user/repositories. Ranger's test image also provides Ozone, Trino, and
 Kafka service definitions; bootstrap explicitly ensures their `dev_ozone`,
 `dev_trino` and `dev_kafka` test services, including on fresh databases.
+If Ranger concurrently creates a demo service during bootstrap, a duplicate
+response is accepted only after an exact read confirms the expected service
+type; the bootstrap does not retry the write or ignore lookup failures.
 PACT writes only `managed` policies to them during these
 tests. No corresponding backend applications are started. The bootstrap
 rejects an Artifact Keeper instance with existing permissions. The tests
