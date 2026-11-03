@@ -14,6 +14,7 @@ import io.github.pactproject.postgresql.model.DefaultPrivilegeGrant;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.Grant;
+import io.github.pactproject.postgresql.model.Ownership;
 import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.Privilege;
 import org.junit.jupiter.api.Test;
@@ -26,9 +27,50 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PostgreSqlBackendTest {
+    @Test
+    void ownershipPreparationIsReadOnlyAndRollbackRestoresOnlyDeclaredOwners() throws Exception {
+        var client = new FakeClient();
+        var backend = new PostgreSqlBackend("postgres", client);
+        var target = new GrantTarget("app", "sales", "orders", null);
+        var previous = ownershipState("a", target);
+        var desired = ownershipState("b", target);
+        var transaction = backend.prepareTransaction(previous, desired);
+        assertTrue(client.actualOwners.isEmpty());
+        assertTrue(client.operations.isEmpty());
+        transaction.apply();
+        assertEquals("b", client.actualOwners.get(target));
+        transaction.rollback();
+        assertEquals("a", client.actualOwners.get(target));
+
+        var firstAssignment = backend.prepareTransaction(PactState.empty(), desired);
+        firstAssignment.apply();
+        firstAssignment.rollback();
+        assertEquals("b", client.actualOwners.get(target), "Unspecified previous ownership must not be invented");
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertEquals("b", client.actualOwners.get(target), "Removing ownership must retain the owner");
+    }
+
+    @Test
+    void ownershipReferenceFailurePreventsIdentityAndGrantWrites() {
+        var client = new FakeClient();
+        client.failOwnershipValidation = true;
+        var target = new GrantTarget("app", "sales", "orders", null);
+        var desired = ownershipState("owner", target);
+        assertThrows(BackendOperationException.class,
+                () -> new PostgreSqlBackend("postgres", client).prepareTransaction(PactState.empty(), desired));
+        assertTrue(client.operations.isEmpty());
+    }
+
+    private static PactState ownershipState(String role, GrantTarget target) {
+        return new PactState(Set.of(new Access(role, new Resource("postgres", Map.of(
+                "database", target.database(), "schema", target.schema(), "table", target.table())),
+                Map.of("ownership", Value.set(Set.of(Value.string("table")))))));
+    }
+
     @Test
     void recoveryScopeIncludesFailedDatabaseWhenSourceMovesElsewhere() throws Exception {
         var client = new FakeClient();
@@ -241,11 +283,28 @@ class PostgreSqlBackendTest {
     private static final class FakeClient implements PostgreSqlClient {
         private final Set<Grant> actual = new HashSet<>();
         private final Set<DefaultPrivilegeGrant> actualDefaults = new HashSet<>();
+        private final Map<GrantTarget, String> actualOwners = new java.util.HashMap<>();
+        private boolean failOwnershipValidation;
         private Set<Identity> desiredIdentities = Set.of();
         private final List<String> operations = new ArrayList<>();
         private boolean failOnRead;
         private String failBeforeDatabase;
         private int identityReconciliationCount;
+
+        @Override
+        public void validateOwnerships(Set<Ownership> desired, Set<String> ensuredRoles)
+                throws PostgreSqlClientException {
+            if (failOwnershipValidation) throw new PostgreSqlClientException("Missing ownership reference");
+        }
+
+        @Override
+        public void synchronize(Set<String> databases, Set<Grant> desired,
+                Set<DefaultPrivilegeGrant> defaults, Set<DefaultPrivilegeScope> scopes,
+                Set<DefaultPrivilegeOverride> overrides, Set<Ownership> ownerships)
+                throws PostgreSqlClientException {
+            ownerships.forEach(owner -> actualOwners.put(owner.target(), owner.role()));
+            synchronize(databases, desired, defaults, scopes, overrides);
+        }
 
         @Override
         public Set<Grant> getManagedGrants(Set<String> databases)

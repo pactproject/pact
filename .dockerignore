@@ -3,3 +3,11 @@
 .vscode
 **/target
 **/.DS_Store
+*.log
+**/*.log
+.env
+**/.env
+*.local.yaml
+*.local.yml
+**/*.local.yaml
+**/*.local.yml

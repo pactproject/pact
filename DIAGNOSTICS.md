@@ -12,7 +12,7 @@ Do not attach a raw transport/SDK/parser exception that bypasses masking.
 | --- | --- | --- |
 | Reconciliation start/end | INFO; ERROR on failure | `reconciliation` ID, `phase=reconcile`, `result`, desired access/identity counts at start, `duration_ms` at end, recovery backend IDs on failure. |
 | Changed backend prepare/apply/rollback | INFO; ERROR on failure | Same reconciliation ID, configured `backend` ID, `phase`, `result=started/completed/failed`, elapsed monotonic `duration_ms` on completion/failure, exception type on failure. |
-| Ordinary unchanged backend | DEBUG | Reconciliation ID, backend ID, `phase=skip`, `result=unchanged`. A backend with failed-compensation context must not be skipped. |
+| Ordinary unchanged backend | DEBUG | Reconciliation ID, backend ID, `phase=skip`, `result=unchanged`. Startup reconciliation and backends with failed-compensation context must not be skipped. |
 | Plan and scope | DEBUG, or a compact INFO summary | Native scope, previous/desired object counts, retained recovery scope and planned create/update/delete counts where known. |
 | Native mutation | DEBUG | Action, principal/object and native scope/ID, start and result. Include privilege sets, safe role/policy definitions or permission SQL when useful. Identity actions report role/user and action only, never password-bearing SQL/bodies. |
 | Failure | WARN/ERROR | Failed phase/operation, safe native error details, HTTP status or SQLState where available; confirmed completed operations if tracked. Preserve the original apply failure when compensation also fails. |

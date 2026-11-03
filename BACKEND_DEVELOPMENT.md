@@ -23,7 +23,8 @@ PACT's extension point is `pact-api`:
   The application closes backend clients before unloading plugins, including
   clients created before a later initialization failure. Close must not revoke
   permissions or delete accounts.
-- `PactCore` groups state by backend id, skips unchanged backends, prepares
+- `PactCore` groups state by backend id, skips unchanged backends after a successful
+  startup reconciliation, prepares
   transactions for changed backends, then applies them in deterministic backend
   id order.
 
@@ -57,7 +58,7 @@ PACT's current backend modules do not yet follow one uniform internal layout:
 | Backend | Existing structure | Transaction pattern |
 | --- | --- | --- |
 | Ranger | `compile`, `sync`, `api`, `client`, config and backend | By default reconciles every policy in the configured service; `managed-only` opts into limiting writes/deletes to policies labeled `managed`. Ensures missing policy users, creating them with random passwords that are not retained. |
-| PostgreSQL | `compile`, `model`, `sync`, `api`, `client`, config and backend | Reconciles ACLs authoritatively by default, with explicit grantor compatibility mode; rollback reapplies previous grants/defaults across the transition scope. Identity/password effects are separate and irreversible. |
+| PostgreSQL | `compile`, `model`, `sync`, `api`, `client`, config and backend | Reconciles ACLs authoritatively by default, with explicit grantor compatibility mode. Explicit ownership is authoritative-only; rollback reapplies previous grants/defaults and declared owners across the transition scope. First ownership assignments without a previous constraint and identity/password effects can survive compensation. |
 | Artifact Keeper | `sync`, `model`, `api`, `client`, config and backend | Treats permissions returned by the configured service as the actual state and deletes permissions absent from desired state. Backend coordinates compilation, immutable actual state, per-apply account caching and diff application; performs read-only reference validation in `prepareTransaction` and uses previous-state compensation. Missing `svc-` usernames trigger service-account creation. Account metadata determines logical principal types; the current API writes service-account permissions as `service_account`; the retired `legacy` profile is rejected during backend initialization. |
 | Elasticsearch | `compile`, `model`, `sync`, `api`, `client`, config and backend | Official Java client 9.2.3; reconciles owned roles and native-user assignments; rollback synchronizes the previous declaration. Index/cluster privileges and existing roles; `managed` preserves foreign assignments for compatibility, `authoritative` enforces exact roles within declared user scope. Identity creation/rotation is separate from grants. |
 
@@ -179,6 +180,15 @@ Override it for recovery support; the API rejects a non-empty recovery context
 by default rather than dropping it. Scoped plugins must retain every attempted
 scope for both apply and rollback. Context is runtime-only for now: restart
 persistence in Kubernetes status/filesystem storage is not implemented.
+
+Startup reconciliation reapplies current desired state to every backend in
+current or restored state, including equal declarations; unused configured
+backends remain untouched. Restoration itself is read-only. Kubernetes first
+reconciles the complete aggregate of current active specs, using successful
+status snapshots as previous state, before processing informer events. A failed
+startup pass does not enable equality skipping on retry. This repairs partial
+writes within recoverable scopes, but does not resume interrupted rollback or
+recover attempted scopes absent from current/restored declarations and config.
 
 For a backend that needs preflight checks or an explicit plan, the flow is:
 

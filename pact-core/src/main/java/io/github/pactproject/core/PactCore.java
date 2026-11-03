@@ -27,6 +27,7 @@ public final class PactCore implements AutoCloseable {
     private PactState appliedState = PactState.empty();
     // Runtime only: preserve every possibly affected scope until apply or rollback succeeds.
     private final Map<String, Set<PactState>> recoveryStates = new HashMap<>();
+    private boolean startupReconciled;
     private boolean reconciliationStarted;
     private boolean closed;
 
@@ -49,8 +50,8 @@ public final class PactCore implements AutoCloseable {
 
         String reconciliationId = UUID.randomUUID().toString();
         long started = System.nanoTime();
-        log.info("reconciliation={} phase=reconcile result=started desired_accesses={} desired_identities={}",
-                reconciliationId, desiredState.accesses().size(), desiredState.identities().size());
+        log.info("reconciliation={} phase=reconcile result=started desired_accesses={} desired_identities={} startup={}",
+                reconciliationId, desiredState.accesses().size(), desiredState.identities().size(), !startupReconciled);
         try {
             applyDesiredState(desiredState, reconciliationId);
             log.info("reconciliation={} phase=reconcile result=completed duration_ms={}", reconciliationId, elapsedMillis(started));
@@ -106,7 +107,10 @@ public final class PactCore implements AutoCloseable {
                 throw new ApplyException("Failed to validate backend identities", e);
             }
 
-            if (previousState.equals(desiredStateForBackend) && !recoveryStates.containsKey(backendId)) {
+            // Restored declarations do not prove that a previous process completed
+            // its writes. Reconcile every participating backend once after startup.
+            if (startupReconciled && previousState.equals(desiredStateForBackend)
+                    && !recoveryStates.containsKey(backendId)) {
                 log.debug(
                         "reconciliation={} backend={} phase=skip result=unchanged",
                         reconciliationId, backendId
@@ -169,6 +173,7 @@ public final class PactCore implements AutoCloseable {
         }
 
         appliedState = desiredState.withoutSecrets();
+        startupReconciled = true;
         startedTransactions.keySet().forEach(recoveryStates::remove);
 
         log.info(

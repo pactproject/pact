@@ -61,12 +61,26 @@ order, including a partially failed one. A preparation failure never triggers
 rollback. A failed transition does not advance agreed state, compensation
 continues after a rollback failure, and the original failure remains available.
 
-Core deliberately skips equal previous/desired backend state, even if the
-external system has drifted, unless compensation previously failed. It does not
-periodically repair that drift. Only backends present in previous or desired
+Core reapplies every participating backend on startup even when current and
+restored declarations are equal. After a successful startup pass, equal backend
+states are skipped even if the external system has drifted, unless compensation
+previously failed. It does not periodically repair that drift. Only backends present in previous or desired
 state or retained recovery scope participate; an unused configured
 instance does not receive empty state on startup. This is separate from plugin
-idempotency. A configuration-only mode change does not force equal state to run.
+idempotency. A configuration-only mode change takes effect during startup
+reconciliation, but does not force equal state to run later in the same process.
+
+Startup repair and its limits are covered by
+[PactCoreTest#reconcilesRestoredStateOnceAtStartupThenSkipsEqualDeclarations](pact-core/src/test/java/io/github/pactproject/core/PactCoreTest.java),
+[PactCoreTest#startupReconcilesUnchangedChangedAndRemovedBackendsButNotUnusedOnes](pact-core/src/test/java/io/github/pactproject/core/PactCoreTest.java),
+[PactCoreRecoveryTest#newCoreRepairsPartialWritesInRestoredScopeEvenWhenSourceWasReverted](pact-core/src/test/java/io/github/pactproject/core/PactCoreRecoveryTest.java), and
+[PactCoreRecoveryTest#failedStartupIsRetriedEvenWhenCompensationSucceeded](pact-core/src/test/java/io/github/pactproject/core/PactCoreRecoveryTest.java).
+These use a new core over retained fake external state; they do not establish
+durable recovery of attempted scopes or hard-kill recovery of real services.
+Kubernetes startup aggregation and fail-closed validation are covered by
+[KubernetesStateProviderTest#startupAppliesCompleteCurrentStateInsteadOfMixingRestoredSnapshots](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java),
+[KubernetesStateProviderTest#startupValidationFailureDoesNotApplyAnyPartialDesiredState](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java), and
+[KubernetesStateProviderTest#startupApplyFailureKeepsLastSuccessfulStatusAndFinalizer](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java).
 
 Concrete assertions are in
 [PactCoreTest#preparesChangedBackendsBeforeApplyingAny](pact-core/src/test/java/io/github/pactproject/core/PactCoreTest.java),
@@ -89,7 +103,7 @@ Packaged plugin discovery and shared API class identity are exercised by
 Its broken-descriptor case checks failure wrapping and JAR release; each
 backend config suite also checks its real ServiceLoader registration.
 
-All four backend config parsers reject unknown keys. Their diagnostic string
+All backend config parsers reject unknown keys. Their diagnostic string
 representations preserve non-secret settings while masking connection passwords
 and tokens. Elasticsearch additionally checks client release without grant/user
 mutations in
@@ -123,6 +137,51 @@ These checks do not prove all logging/status paths are secret-safe; extend them
 when introducing new paths.
 
 ## Complete JUnit suite inventory
+
+PostgreSQL ownership suites:
+
+- [JdbcOwnershipTest](pact-postgresql/src/test/java/io/github/pactproject/postgresql/client/JdbcOwnershipTest.java): quoted DDL, read-only resolution, matching-owner no-op, missing/duplicate/malformed catalog references, canonical routine conflicts and sequence dependencies before writes.
+- [PostgreSqlOwnershipLiveIntegrationTest](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlOwnershipLiveIntegrationTest.java): opt-in PostgreSQL 18 ownership through filesystem and Kubernetes compilation/core, database/schema/table/view/materialized-view/partition/sequence/routine targets, native serial/identity dependencies, child boundaries, real owner DDL and SECURITY DEFINER execution, final-owner defaults, declared-owner compensation, lost commit responses, cross-database failure/retry and startup repair.
+
+[PostgreSqlBackendTest#ownershipPreparationIsReadOnlyAndRollbackRestoresOnlyDeclaredOwners](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlBackendTest.java)
+checks read-only preparation and retained ownership on first-assignment compensation/removal.
+[PostgreSqlOwnershipLiveIntegrationTest#bothProvidersAssignExactOwnersAndEmptyStateRetainsOwnership](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlOwnershipLiveIntegrationTest.java)
+covers both public declaration formats, matching-object catalog stability and native boundaries.
+[PostgreSqlOwnershipLiveIntegrationTest#compensatesOwnerChangesAcrossDatabasesAfterFirstCommitAndAllowsRetry](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlOwnershipLiveIntegrationTest.java)
+injects failure after a real database commit. The startup scenario recreates core
+over real remote state; it does not kill a JVM during reconciliation or recover
+unknown original owners. Concurrent DDL and foreign-table ownership are not
+established by these live cases. Existing owner roles may lack schema USAGE:
+the defaults case verifies revocation does not retain temporary schema access.
+
+Grafana plugin suites:
+
+Named Grafana selectors follow the object currently at the declared path/title,
+including previous-state cleanup after name reuse and startup restore. They do
+not retain old UIDs across transitions. This contract is covered by
+[GrafanaBackendTest#namedScopeFollowsCurrentFolderNameAcrossTransitionsAndRemoval](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java),
+[GrafanaBackendTest#restoredNamedScopeCleansCurrentNameWithoutBindingOldUid](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java), and
+[GrafanaBackendTest#missingPreviousNamesAllowRemovalWhileMissingDesiredNamesStillFail](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java).
+Renamed/moved objects outside those selectors retain their ACLs; a missing
+previous selector does not block cleanup, while ambiguity still fails closed.
+
+- [GrafanaConfigTest](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaConfigTest.java): authoritative defaults, strict config, discovery and credential masking.
+- [GrafanaCompilerTest](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaCompilerTest.java): native targets, aliases, permissions and deterministic compilation.
+- [GrafanaBackendTest](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java): exact resolution, complete preflight, scope, compensation, recovery, native diagnostics and close.
+- [GrafanaHttpClientTest](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaHttpClientTest.java): wire mapping, all catalog boundaries, timeouts, encoding, indeterminate writes and secret-safe errors.
+- [GrafanaProviderTest](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaProviderTest.java): filesystem/Kubernetes declarations with arbitrary IDs and overlapping accesses.
+- [GrafanaLiveIntegrationTest](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaLiveIntegrationTest.java): opt-in native authorization, inheritance, cleanup and recovery.
+
+[GrafanaBackendTest#compensatesLostResponsesToPreviousDeclarationAcrossAttemptedScopesAndRetries](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java)
+covers B07/B08; its core recovery and separate-transaction cases cover B11.
+The HTTP suite covers paginated search and unpaged user/ACL completeness,
+and provider tests exercise both public declaration paths through core.
+The live suite targets disposable Grafana 13.3.0: real dashboard read/edit
+authorization, inherited folder access, unrelated boundary, cleanup and a
+client-boundary fault after a successful real write. Fixture-created users
+represent pre-existing OIDC users; OIDC login/linking is not tested. C02 is
+rejected; C04 uses JVM trust only. Catalogs have no atomic revision/total, so
+undetectable server-side omission/concurrent edits cannot be ruled out.
 
 Additional recovery/catalog/diagnostic suites:
 

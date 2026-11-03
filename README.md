@@ -39,8 +39,13 @@ Rollback restores the previous agreed declaration. If compensation itself
 fails, the next reconciliation applies the current source declaration, even
 when it equals the previously agreed state or is empty, and includes all
 possibly affected scopes in cleanup. This recovery context currently exists
-only in core memory and is lost on restart. Ordinary unchanged backend states
-are still skipped; PACT does not periodically repair external drift.
+only in core memory and is lost on restart. After startup, the first successful
+reconciliation reapplies the current declaration to every backend represented
+in current or restored state, even when those declarations are equal. Unused
+configured backends are not sent an empty state. Later unchanged backend states
+are skipped; PACT does not periodically repair external drift. Startup repair
+is limited to scopes recoverable from current/restored declarations and backend
+configuration; it cannot recover an attempted scope known only to the lost process.
 
 ## Design principles
 
@@ -98,8 +103,9 @@ provide them through the deployment's secret/configuration mechanism.
 | `pact-kubernetes` | Watches `DataAccess` custom resources and reconciles their combined state |
 | `pact-ranger` | Compiles access into managed policies for a configured Apache Ranger service |
 | `pact-artifact-keeper` | Reconciles Artifact Keeper permissions for all target types ([scope and compatibility](pact-artifact-keeper/README.md)) |
-| `pact-postgresql` | Reconciles PostgreSQL object privileges and declared role identities |
+| `pact-postgresql` | Reconciles PostgreSQL object privileges, explicit object ownership and declared role identities |
 | `pact-elasticsearch` | Reconciles Elasticsearch 9 native users, index/cluster privileges and existing role assignments |
+| `pact-grafana` | Reconciles existing users' direct folder/dashboard ACLs in one Grafana organization, using exact names or UIDs ([scope and examples](pact-grafana/README.md)) |
 
 Backend-specific configuration, supported access fields, permissions, and
 operational requirements belong in each module's README.
@@ -185,13 +191,13 @@ secret mechanism rather than baking them into the image.
 
 GitHub Actions builds the image for pull requests and publishes it to GHCR
 when an image version tag is pushed. Prefix release tags with `image-v`; for
-example, to publish and pull release `8`:
+example, to publish and pull release `9`:
 
 ```shell
-python integration/scripts/check-release.py 8
-git tag image-v8
-git push origin image-v8
-docker pull ghcr.io/pactproject/pact:8
+python integration/scripts/check-release.py 9
+git tag image-v9
+git push origin image-v9
+docker pull ghcr.io/pactproject/pact:9
 ```
 
 GHCR package visibility is managed in GitHub; make the package public there if
@@ -256,3 +262,8 @@ as well. Its E2E run exercises the filesystem provider and the Ranger,
 Artifact Keeper, PostgreSQL and Elasticsearch backends against disposable services.
 Elasticsearch checks real read/write operations, privilege updates, an unrelated
 index boundary and empty-state revocation through the same application instance.
+The Grafana plugin has a separate focused suite for real folder/dashboard
+authorization, both provider declaration paths, revocation and compensation;
+it is also included in the Compose backend live-test runner. See the
+[Grafana backend README](pact-grafana/README.md) for the existing-user prerequisite,
+exact name/UID selectors and authoritative ACL scope.

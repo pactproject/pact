@@ -7,13 +7,31 @@
     <parent>
         <groupId>io.github.pactproject</groupId>
         <artifactId>pact</artifactId>
-        <version>8</version>
+        <version>9</version>
     </parent>
 
     <artifactId>pact-postgresql</artifactId>
     <version>1.0.2</version>
 
     <dependencies>
+        <dependency>
+            <groupId>io.github.pactproject</groupId>
+            <artifactId>pact-core</artifactId>
+            <version>${pact.api.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.pactproject</groupId>
+            <artifactId>pact-filesystem</artifactId>
+            <version>1.0.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.pactproject</groupId>
+            <artifactId>pact-kubernetes</artifactId>
+            <version>1.0.1</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>io.github.pactproject</groupId>
             <artifactId>pact-api</artifactId>

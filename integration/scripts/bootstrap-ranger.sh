@@ -40,6 +40,21 @@ ensure_service() {
         -X POST "$service_url" --data "$payload")
     case "$status" in
         200|201) echo "Created Ranger test service $name ($type)" ;;
+        400|409)
+            # The image creates demo services asynchronously after its API starts.
+            # A concurrent create can win between our exact lookup and POST.
+            # Verify the postcondition read-only; never retry the write or accept
+            # a missing service, wrong type, malformed response or failed read.
+            existing_status=$(curl -sS -o /tmp/ranger-service-response -w '%{http_code}' \
+                -u "$RANGER_USERNAME:$RANGER_PASSWORD" "$service_url/name/$name")
+            if [ "$existing_status" = "200" ] \
+                && jq -e --arg type "$type" '.type == $type' /tmp/ranger-service-response >/dev/null; then
+                echo "Ranger test service $name was created concurrently ($type)"
+            else
+                echo "Failed to create Ranger test service $name (HTTP $status; verification HTTP $existing_status)" >&2
+                exit 1
+            fi
+            ;;
         *) echo "Failed to create Ranger test service $name (HTTP $status)" >&2; exit 1 ;;
     esac
 }

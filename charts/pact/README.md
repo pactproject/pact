@@ -15,11 +15,11 @@ helm upgrade --install pact .\charts\pact `
   --namespace pact-system `
   --create-namespace `
   --set image.repository=registry.example/pact `
-  --set image.tag=8 `
+  --set image.tag=9 `
   --values .\pact-values.yaml
 ```
 
-The chart's default image is `ghcr.io/pactproject/pact:8`. Set a repository
+The chart's default image is `ghcr.io/pactproject/pact:9`. Set a repository
 and version explicitly for the features required by your deployment.
 
 The chart installs a `DataAccess` CRD by default. Set `crd.create: false` when

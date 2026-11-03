@@ -133,6 +133,7 @@ public final class DataAccessController
                             .getItems();
             restoreAppliedResources(resources);
             reconciler.restoreAppliedState(aggregateAppliedState());
+            reconcileInitialState(resources);
 
             informer = client.genericKubernetesResources(resourceContext)
                     .inAnyNamespace()
@@ -202,6 +203,39 @@ public final class DataAccessController
         }
         appliedResources.clear();
         appliedResources.putAll(restored);
+    }
+
+    private void reconcileInitialState(List<GenericKubernetesResource> resources)
+            throws StateReconciliationException
+    {
+        Map<ResourceKey, AppliedResource> desiredResources = new HashMap<>();
+        for (GenericKubernetesResource resource : resources) {
+            if (isDeleting(resource)) {
+                continue;
+            }
+            ResourceKey key = resourceKey(resource);
+            generation(resource);
+            Map<String, ?> spec = requiredObject(
+                    resource.getAdditionalProperties().get("spec"), "spec");
+            desiredResources.put(key, new AppliedResource(
+                    spec, compiler.compile(List.of(spec))));
+        }
+        // Register cleanup before writing to backends. A resource that started
+        // deleting since the list must not contribute to desired state.
+        desiredResources.keySet().removeIf(
+                key -> ensureFinalizer(key) == FinalizerResult.DELETING);
+        desiredResources = resolveAllCredentials(desiredResources);
+        PactState desired = aggregate(desiredResources, false);
+        if (desiredResources.isEmpty() && appliedResources.isEmpty()) {
+            return;
+        }
+        log.info("Reconciling initial DataAccess state from {} active resource(s)",
+                desiredResources.size());
+        reconciler.apply(desired);
+        // Subsequent informer events must start from the complete current
+        // declaration, not mix one current resource with other old snapshots.
+        appliedResources.clear();
+        appliedResources.putAll(withoutSecrets(desiredResources));
     }
 
     private PactState compileResources(

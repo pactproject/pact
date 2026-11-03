@@ -239,6 +239,21 @@ services:
     ports:
       - "${PACT_ELASTICSEARCH_PORT:-9201}:9200"
 
+  pact-grafana:
+    image: grafana/grafana:13.3.0
+    profiles: ["tests"]
+    environment:
+      GF_SECURITY_ADMIN_USER: pact-fixture-admin
+      GF_SECURITY_ADMIN_PASSWORD: pact-disposable-grafana
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_LOG_LEVEL: warn
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
   backend-live-tests:
     image: ${PACT_INTEGRATION_TEST_IMAGE:-pact-integration-tests:local}
     build:
@@ -257,6 +272,8 @@ services:
       pact-postgres:
         condition: service_healthy
       pact-elasticsearch:
+        condition: service_healthy
+      pact-grafana:
         condition: service_healthy
     entrypoint: ["/bin/sh", "/workspace/integration/scripts/run-backend-live-tests.sh"]
     environment:
@@ -283,6 +300,8 @@ services:
       PACT_IT_ELASTICSEARCH_ENDPOINT: http://pact-elasticsearch:9200
       PACT_IT_ELASTICSEARCH_USERNAME: elastic
       PACT_IT_ELASTICSEARCH_PASSWORD: ${PACT_IT_ELASTICSEARCH_PASSWORD:-PactLocalElastic2!}
+      PACT_IT_GRAFANA_URL: http://pact-grafana:3000
+      PACT_IT_GRAFANA_DISPOSABLE: "true"
     restart: "no"
 
   pact-e2e:

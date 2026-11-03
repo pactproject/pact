@@ -195,6 +195,67 @@ class KubernetesStateProviderTest
     }
 
     @Test
+    void startupAppliesCompleteCurrentStateInsteadOfMixingRestoredSnapshots() throws Exception {
+        var oldA = registrySpec("old-a", "read");
+        var oldB = registrySpec("old-b", "read");
+        var currentA = registrySpec("current-a", "write");
+        var currentB = registrySpec("current-b", "write");
+        for (var entry : List.of(
+                Map.entry("startup-a", List.of(oldA, currentA)),
+                Map.entry("startup-b", List.of(oldB, currentB)))) {
+            var resource = dataAccess("default", entry.getKey(), entry.getValue().get(1));
+            resource.setAdditionalProperty("status", Map.of(
+                    "phase", "Applying", "observedGeneration", 1,
+                    "lastAppliedSpec", entry.getValue().get(0)));
+            kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").resource(resource).create();
+        }
+        var reconciler = new RecordingReconciler();
+        try (var provider = new KubernetesStateProvider(kubernetesClient)) {
+            provider.start(reconciler);
+            var expected = new DataAccessCompiler().compile(List.of(currentA, currentB));
+            assertEquals(new DataAccessCompiler().compile(List.of(oldA, oldB)), reconciler.restoredState);
+            assertEquals(expected, reconciler.appliedStates.getFirst());
+            for (String name : List.of("startup-a", "startup-b")) {
+                awaitDataAccess("default", name, resource -> statusPhase(resource).equals("Ready"));
+            }
+            assertTrue(reconciler.appliedStates.stream().allMatch(expected::equals));
+        }
+    }
+
+    @Test
+    void startupValidationFailureDoesNotApplyAnyPartialDesiredState() throws Exception {
+        createDataAccess("default", "valid", registrySpec("alice", "read"));
+        createDataAccess("default", "invalid", Map.of("resources", "not-an-array"));
+        var reconciler = new RecordingReconciler();
+        try (var provider = new KubernetesStateProvider(kubernetesClient)) {
+            assertThrows(StateProviderException.class, () -> provider.start(reconciler));
+            assertTrue(reconciler.appliedStates.isEmpty());
+        }
+    }
+
+    @Test
+    void startupApplyFailureKeepsLastSuccessfulStatusAndFinalizer() throws Exception {
+        var previous = registrySpec("alice", "read");
+        var current = registrySpec("alice", "write");
+        var resource = dataAccess("default", "startup-failure", current);
+        resource.setAdditionalProperty("status", Map.of(
+                "phase", "Applying", "observedGeneration", 1, "lastAppliedSpec", previous));
+        kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                .inNamespace("default").resource(resource).create();
+        var reconciler = new RecordingReconciler();
+        reconciler.failure = new StateReconciliationException("Backend unavailable",
+                new BackendOperationException("Synthetic startup failure"));
+        try (var provider = new KubernetesStateProvider(kubernetesClient)) {
+            assertThrows(StateProviderException.class, () -> provider.start(reconciler));
+            var retained = kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").withName("startup-failure").get();
+            assertEquals(previous, status(retained).get("lastAppliedSpec"));
+            assertTrue(hasFinalizer(retained));
+        }
+    }
+
+    @Test
     void restoresLastAppliedSnapshotBeforeInformerEvents()
             throws Exception
     {

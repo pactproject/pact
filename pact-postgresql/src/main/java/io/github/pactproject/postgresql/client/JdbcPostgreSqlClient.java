@@ -10,6 +10,7 @@ import io.github.pactproject.postgresql.model.DefaultPrivilegeOverride;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeType;
 import io.github.pactproject.postgresql.model.Grant;
+import io.github.pactproject.postgresql.model.Ownership;
 import io.github.pactproject.postgresql.model.GrantLevel;
 import io.github.pactproject.postgresql.model.GrantTarget;
 import io.github.pactproject.postgresql.model.RoutineSignature;
@@ -202,7 +203,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     public Set<Grant> getManagedGrants(Set<String> databases)
             throws PostgreSqlClientException {
         Set<Grant> result = new HashSet<>();
-        for (String database : databases) {
+        for (String database : new java.util.TreeSet<>(databases)) {
             try (Connection connection = connect(database)) {
                 verifyAuthoritativeSuperuser(connection);
                 try (Statement statement = connection.createStatement()) {
@@ -210,7 +211,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                 }
                 result.addAll(loadManagedGrants(connection, database));
             }
-            catch (SQLException e) {
+            catch (SQLException | RuntimeException e) {
                 throw new PostgreSqlClientException(
                         "Failed to read PACT-owned PostgreSQL grants in database '"
                                 + database + "'",
@@ -311,6 +312,29 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
     }
 
     @Override
+    public void validateOwnerships(Set<Ownership> desired, Set<String> ensuredRoles)
+            throws PostgreSqlClientException {
+        if (desired.isEmpty()) return;
+        requireOwnershipMode();
+        for (String database : desired.stream().map(owner -> owner.target().database())
+                .collect(java.util.stream.Collectors.toCollection(java.util.TreeSet::new))) {
+            try (Connection connection = connect(database)) {
+                verifyAuthoritativeSuperuser(connection);
+                JdbcOwnership.resolve(connection, database, desired, ensuredRoles);
+            } catch (SQLException | RuntimeException e) {
+                throw new PostgreSqlClientException("Failed to validate PostgreSQL ownership in database '"
+                        + database + "'", e);
+            }
+        }
+    }
+
+    private void requireOwnershipMode() throws PostgreSqlClientException {
+        if (config.reconciliationMode() != PostgreSqlReconciliationMode.AUTHORITATIVE) {
+            throw new PostgreSqlClientException("PostgreSQL ownership requires authoritative reconciliation mode");
+        }
+    }
+
+    @Override
     public void synchronize(
             Set<String> databases,
             Set<Grant> desired,
@@ -319,6 +343,22 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             Set<DefaultPrivilegeOverride> overrides
     )
             throws PostgreSqlClientException {
+        synchronize(databases, desired, desiredDefaults, defaultScopes, overrides, Set.of());
+    }
+
+    @Override
+    public void synchronize(Set<String> databases, Set<Grant> desired,
+            Set<DefaultPrivilegeGrant> desiredDefaults, Set<DefaultPrivilegeScope> defaultScopes,
+            Set<DefaultPrivilegeOverride> overrides, Set<Ownership> ownerships)
+            throws PostgreSqlClientException {
+        if (!ownerships.isEmpty()) {
+            requireOwnershipMode();
+            if (ownerships.stream().anyMatch(owner -> !databases.contains(owner.target().database()))) {
+                throw new PostgreSqlClientException("Desired ownership is outside PostgreSQL reconciliation scope");
+            }
+            // Preflight every database before the first database can commit.
+            validateOwnerships(ownerships, Set.of());
+        }
         for (Grant grant : desired) {
             if (!databases.contains(grant.database())) {
                 throw new PostgreSqlClientException(
@@ -344,7 +384,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         }
         // Each database needs its own connection, so the sync is atomic per
         // database only; the backend transaction compensates across databases.
-        for (String database : databases) {
+        for (String database : new java.util.TreeSet<>(databases)) {
             try (Connection connection = connect(database)) {
                 verifyAuthoritativeSuperuser(connection);
                 connection.setAutoCommit(false);
@@ -356,7 +396,8 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                             desired,
                             desiredDefaults,
                             defaultScopes,
-                            overrides
+                            overrides,
+                            ownerships
                     );
                     connection.commit();
                     log.debug("database={} phase=database_sync result=committed", database);
@@ -367,7 +408,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
                     throw e;
                 }
             }
-            catch (SQLException e) {
+            catch (SQLException | RuntimeException e) {
                 throw new PostgreSqlClientException(
                         "Failed to synchronize PostgreSQL grants in database '"
                                 + database + "'",
@@ -383,11 +424,13 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             Set<Grant> desired,
             Set<DefaultPrivilegeGrant> desiredDefaults,
             Set<DefaultPrivilegeScope> defaultScopes,
-            Set<DefaultPrivilegeOverride> overrides
+            Set<DefaultPrivilegeOverride> overrides,
+            Set<Ownership> ownerships
     ) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("SET LOCAL search_path TO pg_catalog");
         }
+        JdbcOwnership.apply(connection, database, ownerships);
         List<Grant> databaseGrants = desired.stream()
                 .filter(grant -> grant.database().equals(database))
                 .toList();
@@ -702,6 +745,31 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             AclGrant acl,
             boolean grantOptionOnly
     ) throws SQLException {
+        Grant temporaryUsage = null;
+        GrantTarget target = acl.grant().target();
+        if (target.schema() != null && target.level() != GrantLevel.SCHEMA) {
+            try (PreparedStatement query = connection.prepareStatement("""
+                    SELECT pg_catalog.has_schema_privilege(r.oid, n.oid, 'USAGE')
+                    FROM pg_catalog.pg_roles r CROSS JOIN pg_catalog.pg_namespace n
+                    WHERE r.rolname = ? AND n.nspname = ?
+                    """)) {
+                query.setString(1, acl.grantor());
+                query.setString(2, target.schema());
+                try (ResultSet rows = query.executeQuery()) {
+                    if (!rows.next()) throw new SQLException("Missing PostgreSQL ACL grantor/schema reference");
+                    boolean usage = rows.getBoolean(1);
+                    if (rows.wasNull() || rows.next()) throw new SQLException("Malformed PostgreSQL grantor privilege catalog");
+                    if (!usage) {
+                        // Ownership need not include schema USAGE. Resolve REVOKE as
+                        // the recorded grantor without leaving it any extra rights.
+                        // This grant and its revoke are invisible outside this transaction.
+                        temporaryUsage = new Grant(new GrantTarget(target.database(), target.schema(), null, null),
+                                acl.grantor(), Privilege.USAGE);
+                        execute(connection, "GRANT", temporaryUsage);
+                    }
+                }
+            }
+        }
         try (Statement statement = connection.createStatement()) {
             statement.execute(
                     "SET LOCAL ROLE " + quoteIdentifier(acl.grantor())
@@ -711,6 +779,7 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             );
             statement.execute("SET LOCAL ROLE NONE");
         }
+        if (temporaryUsage != null) execute(connection, "REVOKE", temporaryUsage);
     }
 
     private void verifyAuthoritativeSuperuser(Connection connection)
