@@ -15,6 +15,8 @@ import io.github.pactproject.api.value.Value;
 import io.github.pactproject.kubernetes.config.KubernetesConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.List;
@@ -31,15 +33,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class KubernetesLiveIntegrationTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
 
-    @Test
-    void preservesGenericFieldsAndProcessesTheFullResourceLifecycle()
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void preservesGenericFieldsAndProcessesTheFullResourceLifecycle(boolean finalizersEnabled)
             throws Exception {
         String namespace = required("PACT_IT_K8S_NAMESPACE");
-        KubernetesConfig config = new KubernetesConfig(
-                required("PACT_IT_K8S_GROUP"),
-                optional("PACT_IT_K8S_VERSION", "v1"),
-                optional("PACT_IT_K8S_PLURAL", "dataaccesses")
-        );
+        KubernetesConfig config = KubernetesConfig.from(Map.of(
+                "group", required("PACT_IT_K8S_GROUP"),
+                "version", optional("PACT_IT_K8S_VERSION", "v1"),
+                "plural", optional("PACT_IT_K8S_PLURAL", "dataaccesses"),
+                "finalizers-enabled", Boolean.toString(finalizersEnabled)));
         KubernetesClient client = new KubernetesClientBuilder().build();
         ResourceDefinitionContext context =
                 new ResourceDefinitionContext.Builder()
@@ -103,7 +106,7 @@ class KubernetesLiveIntegrationTest {
                     context,
                     namespace,
                     name,
-                    candidate -> finalizers(candidate).contains(finalizer)
+                    candidate -> finalizers(candidate).contains(finalizer) == finalizersEnabled
                             && "Ready".equals(status(candidate).get("phase"))
             );
             assertNotNull(ready);

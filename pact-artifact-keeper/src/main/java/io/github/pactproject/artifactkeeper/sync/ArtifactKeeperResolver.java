@@ -43,8 +43,9 @@ public final class ArtifactKeeperResolver {
         } else if (principalType.equals("anonymous") && !ArtifactKeeperCompiler.NIL_ID.equals(principal)) {
             throw new IllegalArgumentException("Anonymous principal must have the nil UUID");
         }
-        String target = permission.targetType().equals("repository")
-                ? state.repositoryById(permission.targetId()).name() : permission.targetId();
+        // Actual grants can outlive their repository. Keep the native ID so an
+        // orphan can be deleted by permission ID, never rebound to a reused name.
+        String target = permission.targetId();
 
         return new ActualArtifactKeeperPermission(
                 permission.id(),

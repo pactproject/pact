@@ -39,6 +39,46 @@ class ArtifactKeeperEnforcementLiveIntegrationTest {
     private static final HttpClient HTTP = HttpClient.newHttpClient();
 
     @Test
+    void startupRebindsRecreatedRepositoryWithoutTransferringOldGrantAndRevocationStillEnforces() throws Exception {
+        try (var fixture = new Fixture()) {
+            String repo = fixture.repository(null);
+            String token = fixture.serviceAccountToken();
+            var desired = state(fixture.principal, Map.of("name", repo), Set.of("read"), null);
+            var core = new PactCore(List.of(fixture.backend));
+            core.apply(desired);
+            var oldGrant = fixture.permissions().getFirst();
+            fixture.assertDownload(repo, token, true);
+
+            fixture.api("DELETE", "/api/v1/repositories/" + repo, null);
+            var afterDeletion = fixture.permissions();
+            assertThrows(io.github.pactproject.api.exception.ValidationException.class,
+                    () -> fixture.backend.prepareTransaction(desired, desired));
+            assertEquals(afterDeletion, fixture.permissions(), "Missing desired names must not trigger cleanup writes");
+            String newId = fixture.api("POST", "/api/v1/repositories", Map.of(
+                    "key", repo, "name", repo, "format", "generic", "repo_type", "local", "is_public", false))
+                    .path("id").asText();
+            assertNotEquals(oldGrant.targetId(), newId);
+            fixture.api("PUT", "/api/v1/repositories/" + repo + "/artifacts/app.bin", Map.of("fixture", "content"));
+            fixture.assertDownload(repo, token, false);
+            core.apply(desired);
+            assertEquals(afterDeletion, fixture.permissions(), "Equal declarations do not repair external drift after startup");
+            fixture.assertDownload(repo, token, false);
+
+            var restarted = new PactCore(List.of(fixture.backend));
+            restarted.restoreAppliedState(desired);
+            restarted.apply(desired);
+            var current = fixture.permissions().getFirst();
+            assertEquals(1, fixture.permissions().size());
+            assertEquals(newId, current.targetId());
+            fixture.assertDownload(repo, token, true);
+            fixture.backend.apply(state(fixture.principal, Map.of("type", "repository", "id", newId), Set.of("read"), null));
+            assertEquals(List.of(current), fixture.permissions(), "Equivalent IDs must preserve the grant");
+            restarted.apply(PactState.empty());
+            fixture.assertDownload(repo, token, false);
+        }
+    }
+
+    @Test
     @EnabledIfEnvironmentVariable(named = "PACT_IT_ARTIFACT_KEEPER_ALLOWED_PROBE_URL", matches = ".+")
     void enforcesCidrsUsingDistinctTcpPeersAndDoesNotTrustSpoofedForwardingHeaders() throws Exception {
         try (var fixture = new Fixture()) {

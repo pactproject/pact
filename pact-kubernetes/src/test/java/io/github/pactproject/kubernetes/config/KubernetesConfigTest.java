@@ -11,6 +11,25 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class KubernetesConfigTest
 {
     @Test
+    void finalizersAreEnabledByDefaultAndCanBeDisabled()
+    {
+        assertEquals(true, KubernetesConfig.from(Map.of()).finalizersEnabled());
+        assertEquals(true, KubernetesConfig.from(
+                Map.of("finalizers-enabled", "true")).finalizersEnabled());
+        assertEquals(false, KubernetesConfig.from(
+                Map.of("finalizers-enabled", "false")).finalizersEnabled());
+    }
+
+    @Test
+    void rejectsInvalidFinalizerSetting()
+    {
+        for (String value : List.of("", "yes", "0", "typo")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> KubernetesConfig.from(Map.of("finalizers-enabled", value)));
+        }
+    }
+
+    @Test
     void readsConfiguredResourceCoordinates()
     {
         assertEquals(

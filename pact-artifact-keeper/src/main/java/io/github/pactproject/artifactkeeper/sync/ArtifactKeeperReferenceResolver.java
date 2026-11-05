@@ -49,7 +49,7 @@ public final class ArtifactKeeperReferenceResolver {
                 }
             }
             resolved.add(new ArtifactKeeperPermission(permission.targetType(), target,
-                    !permission.targetType().equals("repository"), principalType, principal,
+                    true, principalType, principal,
                     permission.actions(), permission.conditions()));
         }
         return ArtifactKeeperCompiler.merge(resolved);
@@ -58,7 +58,7 @@ public final class ArtifactKeeperReferenceResolver {
     private String resolveTarget(ArtifactKeeperPermission permission) throws ArtifactKeeperClientException {
         String target = permission.target();
         if (permission.targetType().equals("repository")) {
-            return (permission.targetById() ? state.repositoryById(target) : state.repositoryByName(target)).name();
+            return (permission.targetById() ? state.repositoryById(target) : state.repositoryByName(target)).id();
         }
         if (permission.targetById()) return target;
         return switch (permission.targetType()) {

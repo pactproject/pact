@@ -132,6 +132,43 @@ Names are configuration references, not durable snapshots of an object ID.
 Reusing a name for another object changes what the next reconciliation targets;
 use an explicit ID when the declaration must remain bound to one object.
 
+### Repository deletion and recreation
+
+Permissions are compared using the native target type and ID. A stored
+repository permission whose target ID is absent from the complete repository
+catalog remains part of the authoritative diff. PACT deletes that orphan by
+its permission ID and logs `action=delete_orphan_permission` with the old target
+ID. It does not guess the deleted repository's name or treat its permission as
+a grant on a newly created repository with the same name. All physical orphan
+permission IDs participate in cleanup, including duplicate grants.
+
+On the next apply, a named declaration resolves to the recreated repository's
+new ID and creates the requested grants there. A grant already matching that
+new ID is retained. An explicit old repository ID, or a desired name still
+missing or ambiguous in the catalog, fails validation before any permission or
+account writes, including orphan deletion. Failed or incomplete catalog reads
+also stop reconciliation; they are never interpreted as an empty catalog.
+This fixes the earlier behavior where one orphan repository grant stopped
+preparation of the entire Artifact Keeper backend, including unrelated cleanup.
+Rollback reapplies the previous declaration using current references; it does
+not recreate the deleted repository or restore its orphan permissions.
+
+External recreation alone does not trigger reconciliation. After successful
+startup, core skips equal declarations, and Kubernetes informer resync does not
+periodically re-resolve repository names or retry these reference failures.
+Correct missing desired references first, then change the declaration to the
+current name/ID or restart PACT to force startup reconciliation. Restart can
+fail while a current desired reference is missing. Disabling Kubernetes
+finalizers only unblocks resource deletion; it does not repair Artifact Keeper
+permissions or change this validation behavior.
+
+Regression tests cover stable-ID rename, keys equal to another target's UUID,
+duplicate orphan grants, preflight/apply changes and compensation/retry. A live
+enforcement scenario deletes/recreates a private repository under the same key,
+verifies a new ID and denied downloads before repair, then checks startup repair,
+name/ID equivalence and revocation. Fake tests force orphan rows independently of
+the server's cascade behavior.
+
 Filesystem access uses `principal`, `resource.backendId`, `resource.target`,
 and `attributes` (`actions`, `principal-type`, and optional `allowed_cidrs`), as
 shown in the [filesystem fixture](../integration/e2e/desired-state.yaml).

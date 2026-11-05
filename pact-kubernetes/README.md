@@ -22,6 +22,34 @@ comma-separated sequence of positive millisecond delays; it controls retries
 after the initial status patch attempt. These settings are configured in the
 state provider's `config` map.
 
+Finalizers are enabled by default. Set `finalizers-enabled: "false"` to opt out
+for every DataAccess observed by this controller:
+
+```yaml
+stateProvider:
+  type: kubernetes
+  config:
+    finalizers-enabled: "false"
+```
+
+Restart the controller after changing this setting. With finalizers disabled,
+startup removes existing `<group>/data-access` finalizers from all listed
+resources, including deleting resources, before validation or backend cleanup.
+Event handling also removes this marker when encountered and never adds it.
+Other controllers' finalizers are preserved. The controller still needs `patch`
+permission to remove existing markers and update status.
+
+Deletion still requests reconciliation of the remaining aggregate, preserving
+access requested by other DataAccess resources. Cleanup is best effort in this
+mode: deletion is not blocked by backend failures. A missed delete event, an
+offline controller, or a restart after deletion can leave external grants,
+because the deleted resource's `status.lastAppliedSpec` is gone. Failed cleanup
+is logged, but a deleted object cannot retain error status or provide a durable
+retry trigger. To retain cleanup guarantees, keep the default enabled. When
+opting out, clear `spec.resources` and reconcile successfully before deleting
+if revocation must be confirmed. Re-enabling the setting installs finalizers
+on active resources again; it cannot recover already deleted snapshots.
+
 `KubernetesConfig` owns resource coordinate parsing and defaults. The
 `controller` package contains informer, queue, status, and finalizer behavior;
 the `compile` package translates DataAccess specs into PACT state.
@@ -124,8 +152,8 @@ resources:
   from `status.lastAppliedSpec`. It then validates and applies the complete
   aggregate of current active specs, excluding deleting resources, before
   starting the informer. Core reconciles backends from current or restored
-  state even when equal; unused configured backends remain untouched. Finalizers
-  are installed before backend writes. Invalid startup input or a failed startup
+  state even when equal; unused configured backends remain untouched. Enabled
+  finalizers are installed before backend writes. Invalid startup input or a failed startup
   reconciliation prevents startup without advancing successful status snapshots.
 - Startup reconciliation repairs only scopes recoverable from current/restored
   declarations and backend configuration. Attempted scopes known only to the
@@ -140,7 +168,7 @@ resources:
 - Status is written through the status subresource. Failed validation or
   backend reconciliation sets `phase: Error` and `observedGeneration` while
   preserving the last successful `lastAppliedSpec`.
-- The controller adds `<group>/data-access` before applying a resource.
+- By default, the controller adds `<group>/data-access` before applying a resource.
   During deletion, it removes that finalizer only after successful cleanup.
   A repeated delete callback after the resource's applied snapshot has already
   been removed is treated as a no-op.
@@ -219,3 +247,9 @@ separate controller JVMs and verifies restart restores and reconciles applied
 state without rewriting already matching permissions. This is a graceful
 restart test, not a hard-kill test during reconciliation. Run it using the `kubernetes` Compose profile described
 in [INTEGRATION_TESTS.md](../INTEGRATION_TESTS.md).
+
+The real API lifecycle suite runs with finalizers enabled and disabled. An
+additional Kubernetes/Artifact Keeper scenario starts from a persisted deleting
+resource, disables finalizers and injects a cleanup failure. It verifies that
+the API completes deletion while the backend grants remain, making the opt-out
+tradeoff explicit rather than asserting that removal guarantees revocation.

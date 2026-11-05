@@ -10,7 +10,8 @@ public record KubernetesConfig(
         String plural,
         long informerResyncMillis,
         long informerStartTimeoutSeconds,
-        List<Long> statusRetryDelaysMillis)
+        List<Long> statusRetryDelaysMillis,
+        boolean finalizersEnabled)
 {
     private static final long DEFAULT_INFORMER_RESYNC_MILLIS = 5_000L;
     private static final long DEFAULT_INFORMER_START_TIMEOUT_SECONDS = 30L;
@@ -23,7 +24,8 @@ public record KubernetesConfig(
                     "plural",
                     "informer-resync-millis",
                     "informer-start-timeout-seconds",
-                    "status-retry-delays-millis"
+                    "status-retry-delays-millis",
+                    "finalizers-enabled"
             );
 
     public KubernetesConfig
@@ -43,6 +45,18 @@ public record KubernetesConfig(
                             + "must contain only positive integers"
             );
         }
+    }
+
+    public KubernetesConfig(
+            String group,
+            String version,
+            String plural,
+            long informerResyncMillis,
+            long informerStartTimeoutSeconds,
+            List<Long> statusRetryDelaysMillis)
+    {
+        this(group, version, plural, informerResyncMillis,
+                informerStartTimeoutSeconds, statusRetryDelaysMillis, true);
     }
 
     public KubernetesConfig(
@@ -107,7 +121,8 @@ public record KubernetesConfig(
                         config,
                         "status-retry-delays-millis",
                         DEFAULT_STATUS_RETRY_DELAYS_MILLIS
-                )
+                ),
+                configuredBoolean(config, "finalizers-enabled", true)
         );
     }
 
@@ -178,6 +193,26 @@ public record KubernetesConfig(
                     e
             );
         }
+    }
+
+    private static boolean configuredBoolean(
+            Map<String, String> config,
+            String key,
+            boolean defaultValue)
+    {
+        String value = config.get(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (value.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw new IllegalArgumentException(
+                "Kubernetes config '" + key + "' must be true or false"
+        );
     }
 
     private static void requirePositive(long value, String key)

@@ -52,6 +52,10 @@ public final class ArtifactKeeperState {
         );
     }
 
+    public boolean containsRepository(String id) {
+        return repositories.containsKey(id);
+    }
+
     public ArtifactKeeperApiRepository repositoryByName(String name) {
         return unique(repositories.values().stream()
                 .filter(repository -> repository.name().equals(name) || repository.displayName().equals(name))

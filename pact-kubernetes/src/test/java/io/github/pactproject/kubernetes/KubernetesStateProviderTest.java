@@ -5,6 +5,8 @@ import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.dsl.base.PatchContext;
+import io.fabric8.kubernetes.client.dsl.base.PatchType;
 import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.github.pactproject.api.exception.BackendOperationException;
@@ -650,6 +652,103 @@ class KubernetesStateProviderTest
         );
         provider.close();
         assertEquals(2, reconciler.appliedStates.size());
+    }
+
+    @Test
+    void disabledFinalizersStillReconcileStartupAndDeleteWithSharedAccess() throws Exception
+    {
+        var spec = registrySpec("alice", "read");
+        createDataAccess("default", "first", spec);
+        var reconciler = new RecordingReconciler();
+        try (var provider = new KubernetesStateProvider(kubernetesClient,
+                KubernetesConfig.from(Map.of("finalizers-enabled", "false")))) {
+            provider.start(reconciler);
+            var first = awaitDataAccess("default", "first",
+                    resource -> statusPhase(resource).equals("Ready"));
+            assertTrue(!hasFinalizer(first));
+            createDataAccess("default", "second", spec);
+            var second = awaitDataAccess("default", "second",
+                    resource -> statusPhase(resource).equals("Ready"));
+            assertTrue(!hasFinalizer(second));
+
+            int beforeDelete = reconciler.appliedStates.size();
+            kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").withName("first").delete();
+            awaitAppliedStateCount(reconciler, beforeDelete + 1);
+            assertEquals(new DataAccessCompiler().compile(List.of(spec)),
+                    reconciler.appliedStates.getLast());
+
+            beforeDelete = reconciler.appliedStates.size();
+            kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").withName("second").delete();
+            awaitAppliedStateCount(reconciler, beforeDelete + 1);
+            assertEquals(PactState.empty(), reconciler.appliedStates.getLast());
+        }
+    }
+
+    @Test
+    void disablingFinalizersReleasesExistingOnesBeforeFailedStartupCleanup() throws Exception
+    {
+        var spec = registrySpec("alice", "read");
+        var resource = dataAccess("default", "stuck", spec);
+        resource.getMetadata().setFinalizers(List.of(
+                "com.example.ru/data-access", "other.example/cleanup"));
+        resource.setAdditionalProperty("status", Map.of("lastAppliedSpec", spec));
+        kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                .inNamespace("default").resource(resource).create();
+        kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                .inNamespace("default").withName("stuck").patch(
+                        PatchContext.of(PatchType.JSON), """
+                        [{"op":"add","path":"/metadata/deletionTimestamp","value":"2026-11-05T00:00:00Z"}]
+                        """);
+        var reconciler = new RecordingReconciler();
+        reconciler.failure = new StateReconciliationException("Backend unavailable",
+                new BackendOperationException("Synthetic cleanup failure"));
+        try (var provider = new KubernetesStateProvider(kubernetesClient,
+                KubernetesConfig.from(Map.of("finalizers-enabled", "false")))) {
+            assertThrows(StateProviderException.class, () -> provider.start(reconciler));
+            var retained = kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").withName("stuck").get();
+            assertEquals(List.of("other.example/cleanup"), retained.getMetadata().getFinalizers());
+            assertEquals("2026-11-05T00:00:00Z", retained.getMetadata().getDeletionTimestamp());
+            assertEquals(spec, status(retained).get("lastAppliedSpec"));
+            assertEquals(new DataAccessCompiler().compile(List.of(spec)), reconciler.restoredState);
+        }
+    }
+
+    @Test
+    void disabledFinalizersRemoveExistingMarkerOnAddAndBeforeFailedDeleteCleanup() throws Exception
+    {
+        var reconciler = new RecordingReconciler();
+        try (var provider = new KubernetesStateProvider(kubernetesClient,
+                KubernetesConfig.from(Map.of("finalizers-enabled", "false")))) {
+            provider.start(reconciler);
+            var resource = dataAccess("default", "existing-marker", registrySpec("alice", "read"));
+            resource.getMetadata().setFinalizers(List.of(
+                    "com.example.ru/data-access", "other.example/cleanup"));
+            kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").resource(resource).create();
+            var ready = awaitDataAccess("default", "existing-marker",
+                    candidate -> statusPhase(candidate).equals("Ready") && !hasFinalizer(candidate));
+            assertEquals(List.of("other.example/cleanup"), ready.getMetadata().getFinalizers());
+
+            reconciler.failure = new StateReconciliationException("Backend unavailable",
+                    new BackendOperationException("Synthetic cleanup failure"));
+            // Simulate the API server's deletion update. Fabric8's object
+            // patch omits deletionTimestamp because it is a read-only field.
+            kubernetesClient.genericKubernetesResources(DATA_ACCESS)
+                    .inNamespace("default").withName("existing-marker").patch(
+                            PatchContext.of(PatchType.JSON), """
+                            [
+                              {"op":"add","path":"/metadata/deletionTimestamp","value":"2026-11-05T00:00:00Z"},
+                              {"op":"replace","path":"/metadata/finalizers","value":["com.example.ru/data-access","other.example/cleanup"]}
+                            ]
+                            """);
+            var failed = awaitDataAccess("default", "existing-marker",
+                    candidate -> statusPhase(candidate).equals("Error") && !hasFinalizer(candidate));
+            assertEquals(List.of("other.example/cleanup"), failed.getMetadata().getFinalizers());
+            assertEquals(registrySpec("alice", "read"), status(failed).get("lastAppliedSpec"));
+        }
     }
 
     @Test

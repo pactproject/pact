@@ -23,6 +23,130 @@ class ArtifactKeeperNameResolutionTest {
     private static final ArtifactKeeperApiRepository REPO = new ArtifactKeeperApiRepository("repo-1", "repo-a", "Repository A");
 
     @Test
+    void repositoryRenameKeepsIdBoundGrantAndInvalidatesOldNameWithoutWrites() throws Exception {
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(
+                new ArtifactKeeperApiRepository(TARGET, "repo-a", "Repository A")), List.of());
+        var backend = backend(client);
+        var previous = state(access("alice", "user", Map.of("name", "repo-a"), "read"));
+        backend.apply(previous);
+        var grant = client.getPermissions().getFirst();
+        client.repositories(List.of(new ArtifactKeeperApiRepository(TARGET, "renamed", "Renamed repository")));
+        assertThrows(ValidationException.class, () -> backend.prepareTransaction(previous, previous));
+        backend.apply(state(access("alice", "user", Map.of("name", "Renamed repository"), "read")));
+        backend.apply(state(access("alice", "user", Map.of("type", "repository", "id", TARGET), "read")));
+        assertEquals(List.of(grant), client.getPermissions());
+        assertEquals(1, client.createPermissionCalls());
+        assertEquals(0, client.deletePermissionCalls());
+        backend.prepareTransaction(previous, PactState.empty()).apply();
+        assertTrue(client.getPermissions().isEmpty(), "An obsolete previous name must not prevent global-scope cleanup");
+    }
+
+    @Test
+    void repositoryKeyEqualToOrphanUuidNeverAdoptsThatOrphanGrant() throws Exception {
+        var orphan = new ArtifactKeeperApiPermission("orphan", "user", ALICE.id(), "repository", OTHER, Set.of("read"));
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(
+                new ArtifactKeeperApiRepository(TARGET, OTHER)), List.of(orphan));
+        backend(client).apply(state(access("alice", "user", Map.of("name", OTHER), "read")));
+        var current = client.getPermissions().getFirst();
+        assertEquals(1, client.getPermissions().size());
+        assertNotEquals(orphan.id(), current.id());
+        assertEquals(TARGET, current.targetId());
+        assertEquals(1, client.createPermissionCalls());
+        assertEquals(1, client.deletePermissionCalls());
+    }
+
+    @Test
+    void rebindsRecreatedRepositoryBetweenPrepareAndApplyAndKeepsIdEquivalentGrant() throws Exception {
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(
+                new ArtifactKeeperApiRepository(OTHER, "repo-a", "Repository A")), List.of());
+        var backend = backend(client);
+        var named = state(access("alice", "user", Map.of("name", "Repository A"), "read"));
+        backend.apply(named);
+        var pending = backend.prepareTransaction(named, named);
+        client.repositories(List.of(new ArtifactKeeperApiRepository(TARGET, "repo-a", "Repository A")));
+        pending.apply();
+
+        var grant = client.getPermissions().getFirst();
+        assertEquals(TARGET, grant.targetId());
+        assertEquals(2, client.createPermissionCalls());
+        assertEquals(1, client.deletePermissionCalls());
+        backend.apply(state(access("alice", "user", Map.of("type", "repository", "id", TARGET), "read")));
+        assertEquals(List.of(grant), client.getPermissions());
+        assertEquals(2, client.createPermissionCalls());
+        assertEquals(1, client.deletePermissionCalls());
+    }
+
+    @Test
+    void removesEveryOrphanGrantWithoutRewritingMatchingRecreatedRepositoryGrant() throws Exception {
+        var keep = new ArtifactKeeperApiPermission("keep", "user", ALICE.id(), "repository", TARGET, Set.of("read"));
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(
+                new ArtifactKeeperApiRepository(TARGET, "repo-a")), List.of(keep,
+                new ArtifactKeeperApiPermission("old-1", "user", ALICE.id(), "repository", OTHER, Set.of("read")),
+                new ArtifactKeeperApiPermission("old-2", "user", ALICE.id(), "repository", OTHER, Set.of("read"))));
+        var backend = backend(client);
+        var desired = state(access("alice", "user", Map.of("name", "repo-a"), "read"));
+        var pending = backend.prepareTransaction(PactState.empty(), desired);
+        assertEquals(0, client.deletePermissionCalls(), "preparation remains read-only");
+        pending.apply();
+        assertEquals(List.of(keep), client.getPermissions());
+        assertEquals(2, client.deletePermissionCalls());
+        assertEquals(0, client.createPermissionCalls());
+        client.repositories(List.of());
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertTrue(client.getPermissions().isEmpty(), "empty state also removes orphan grants");
+    }
+
+    @Test
+    void missingDesiredRepositoryNameOrIdStillPreventsOrphanCleanupAndIdentityWrites() {
+        var orphan = new ArtifactKeeperApiPermission("orphan", "user", ALICE.id(), "repository", OTHER, Set.of("read"));
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(
+                new ArtifactKeeperApiRepository(TARGET, "repo-a")), List.of(orphan));
+        var backend = backend(client);
+        for (var target : List.of(Map.of("name", "missing"), Map.of("type", "repository", "id", OTHER))) {
+            var desired = state(access("svc-new", "service_account", target, "read"));
+            assertThrows(ValidationException.class, () -> backend.prepareTransaction(PactState.empty(), desired));
+            assertThrows(ValidationException.class, () -> backend.apply(desired));
+        }
+        assertEquals(List.of(orphan), client.getPermissions());
+        assertEquals(0, client.createPermissionCalls());
+        assertEquals(0, client.deletePermissionCalls());
+        assertEquals(0, client.createServiceAccountCalls());
+    }
+
+    @Test
+    void compensationReappliesPreviousNamedGrantOnRecreatedRepositoryAfterPartialFailure() throws Exception {
+        var client = new FakeArtifactKeeperClient(List.of(ALICE), List.of(
+                new ArtifactKeeperApiRepository(TARGET, "repo-a")), List.of(
+                new ArtifactKeeperApiPermission("orphan", "user", ALICE.id(), "repository", OTHER, Set.of("read"))));
+        var backend = backend(client);
+        var previous = state(access("alice", "user", Map.of("name", "repo-a"), "read"));
+        var desired = state(access("alice", "user", Map.of("name", "repo-a"), "write"));
+        var pending = backend.prepareTransaction(previous, desired);
+        client.failNextCreatePermission();
+        assertThrows(BackendOperationException.class, pending::apply);
+        assertTrue(client.getPermissions().isEmpty());
+        pending.rollback();
+        assertEquals(TARGET, client.getPermissions().getFirst().targetId());
+        assertEquals(Set.of("read"), client.getPermissions().getFirst().actions());
+        pending.apply();
+        assertEquals(TARGET, client.getPermissions().getFirst().targetId());
+        assertEquals(Set.of("write"), client.getPermissions().getFirst().actions());
+    }
+
+    @Test
+    void failedRepositoryCatalogReadNeverTurnsIntoOrphanCleanup() {
+        var orphan = new ArtifactKeeperApiPermission("orphan", "user", ALICE.id(), "repository", OTHER, Set.of("read"));
+        var client = client(List.of(orphan));
+        client.failRepositoryReads();
+        var backend = backend(client);
+        assertThrows(BackendOperationException.class, () -> backend.prepareTransaction(PactState.empty(), PactState.empty()));
+        assertThrows(BackendOperationException.class, () -> backend.apply(PactState.empty()));
+        assertEquals(List.of(orphan), client.getPermissions());
+        assertEquals(0, client.deletePermissionCalls());
+        assertEquals(0, client.createPermissionCalls());
+    }
+
+    @Test
     void resolvesGroupSubjectsAndTargetsAndPreservesIdsAcrossReferenceStyles() throws Exception {
         var client = client(List.of());
         client.groups(List.of(new ArtifactKeeperApiNamedObject(GROUP, "readers"),

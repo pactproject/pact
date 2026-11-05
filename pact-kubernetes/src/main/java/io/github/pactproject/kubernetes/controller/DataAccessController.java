@@ -131,6 +131,13 @@ public final class DataAccessController
                             .inAnyNamespace()
                             .list()
                             .getItems();
+            if (!config.finalizersEnabled()) {
+                // Opting out must also unblock existing deletions when backend
+                // cleanup or startup validation cannot succeed.
+                for (GenericKubernetesResource resource : resources) {
+                    removeFinalizer(resourceKey(resource));
+                }
+            }
             restoreAppliedResources(resources);
             reconciler.restoreAppliedState(aggregateAppliedState());
             reconcileInitialState(resources);
@@ -616,6 +623,9 @@ public final class DataAccessController
 
     private void reconcileDelete(DataAccessEvent event)
     {
+        if (!config.finalizersEnabled()) {
+            removeFinalizer(event.key());
+        }
         if (!appliedResources.containsKey(event.key())) {
             log.debug(
                     "Skipping DataAccess delete for {}/{} because its "
@@ -1072,6 +1082,10 @@ public final class DataAccessController
         GenericKubernetesResource current = resource(key).get();
         if (current == null || isDeleting(current)) {
             return FinalizerResult.DELETING;
+        }
+        if (!config.finalizersEnabled()) {
+            removeFinalizer(key);
+            return FinalizerResult.PRESENT;
         }
         List<String> finalizers = finalizers(current);
         if (finalizers.contains(finalizer)) {

@@ -94,7 +94,10 @@ These instructions cover both new backends and changes to existing plugins.
   ownership are checked after expansion. Preserve legacy singular input.
 - The controller reconciles aggregated state across resources, preserves the
   last successful `status.lastAppliedSpec` on failure, restores it on startup,
-  and removes finalizers only after cleanup succeeds. Preserve status snapshot
+  and, when finalizers are enabled (the default), removes them only after cleanup
+  succeeds. Explicit `finalizers-enabled: false` opts out and removes existing
+  PACT finalizers even if cleanup fails; deletion cleanup is then best effort.
+  Preserve status snapshot
   compatibility and unknown fields in the CRD when extending declarations.
   Removing one declaration must retain access still requested by another.
 - Core groups both accesses and identities by backend ID, rejects unknown IDs,
@@ -148,6 +151,15 @@ Implementation rules:
 - Normalize actual/desired objects before diffing. Aggregate overlapping
   declarations deterministically; make create/update/delete/no-op and duplicate
   handling explicit. Verify scope and ownership before destructive operations.
+- Expect external rename/move/deletion/recreation of targets and principals.
+  Define name-following versus native-ID selectors; reused names and ID-looking
+  names must not adopt old grants. Missing desired references fail before writes.
+  Permit precise in-scope cleanup of orphan actual grants and missing previous
+  targets where supported, retaining all physical permission IDs without a
+  deleted display-name lookup. Catalog failures or incomplete reads are not
+  deletion. Document safe failure if ownership/type/scope is unknown, reference
+  changes across prepare/apply/rollback, and actual repair triggers. Cover B12
+  in TESTING.md; external recreation alone does not imply periodic drift repair.
 - Keep external SDK types and transport/SQL construction in adapters; expose
   domain values to compilers and synchronizers. Quote SQL identifiers, bind
   values where supported, and encode URL components safely. Never use fuzzy
@@ -391,7 +403,7 @@ Implementation rules:
   later-page errors, duplicates, malformed envelopes, inconsistent totals and
   premature termination must fail before writes. Native SQL/SDK catalogs need
   equivalent fail-closed coverage without inventing pagination they do not use.
-- `TESTING.md` is the canonical backend test checklist (B01–B11 and applicable
+- `TESTING.md` is the canonical backend test checklist (B01–B12 and applicable
   C01–C05), suite inventory and coverage/gap map. Keep its concrete test
   references and module README aligned with changes. Run
   `python integration/scripts/check-test-contract.py` to catch stale file/method

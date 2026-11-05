@@ -35,7 +35,7 @@ class ArtifactKeeperResolverTest {
                 List.of(
                         new ActualArtifactKeeperPermission(
                                 "permission-1",
-                                "repository-a",
+                                "repo-1",
                                 "user",
                                 "alice",
                                 Set.of("read", "write")
@@ -63,7 +63,7 @@ class ArtifactKeeperResolverTest {
         assertEquals(
                 List.of(new ActualArtifactKeeperPermission(
                         "permission-1",
-                        "repository-a",
+                        "repo-1",
                         "service_account",
                         "svc-build",
                         Set.of("read")
@@ -171,7 +171,7 @@ class ArtifactKeeperResolverTest {
     }
 
     @Test
-    void rejectsUnknownRepository() {
+    void retainsUnknownRepositoryIdForOrphanCleanup() {
         var state = new ArtifactKeeperState(
                 List.of(new ArtifactKeeperApiUser("user-1", "alice")),
                 List.of(),
@@ -185,15 +185,10 @@ class ArtifactKeeperResolverTest {
                 ))
         );
 
-        var exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> ArtifactKeeperResolver.resolve(state)
-        );
-
-        assertEquals(
-                "Artifact Keeper repository not found: missing-repository",
-                exception.getMessage()
-        );
+        var permission = ArtifactKeeperResolver.resolve(state).getFirst();
+        assertEquals("permission-1", permission.id());
+        assertEquals("repository", permission.targetType());
+        assertEquals("missing-repository", permission.target());
     }
 
     @Test

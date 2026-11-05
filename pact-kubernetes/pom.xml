@@ -6,11 +6,11 @@
     <parent>
         <groupId>io.github.pactproject</groupId>
         <artifactId>pact</artifactId>
-        <version>9</version>
+        <version>10</version>
     </parent>
 
     <artifactId>pact-kubernetes</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
 
     <dependencies>
         <dependency>
@@ -22,7 +22,7 @@
         <dependency>
             <groupId>io.github.pactproject</groupId>
             <artifactId>pact-artifact-keeper</artifactId>
-            <version>1.0.0</version>
+            <version>1.0.1</version>
             <scope>test</scope>
         </dependency>
         <dependency>

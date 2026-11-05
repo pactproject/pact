@@ -25,6 +25,7 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
     private int artifactReads;
     private int groupReads;
     private boolean failCatalogReads;
+    private boolean failRepositoryReads;
 
     private int createPermissionCalls;
     private int deletePermissionCalls;
@@ -51,7 +52,8 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
     }
 
     @Override
-    public List<ArtifactKeeperApiRepository> getRepositories() {
+    public List<ArtifactKeeperApiRepository> getRepositories() throws ArtifactKeeperClientException {
+        if (failRepositoryReads) throw new ArtifactKeeperClientException("Repository catalog unavailable");
         return List.copyOf(repositories);
     }
 
@@ -82,6 +84,11 @@ final class FakeArtifactKeeperClient implements ArtifactKeeperClient {
     }
 
     void groups(List<ArtifactKeeperApiNamedObject> values) { groups = List.copyOf(values); }
+    void repositories(List<ArtifactKeeperApiRepository> values) {
+        repositories.clear();
+        repositories.addAll(values);
+    }
+    void failRepositoryReads() { failRepositoryReads = true; }
     void projects(List<ArtifactKeeperApiNamedObject> values) { projects = List.copyOf(values); }
     void artifact(String repository, String path, String version, String id) {
         artifacts.put(new ArtifactKey(repository, path, version), id);

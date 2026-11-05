@@ -1,7 +1,7 @@
 image:
   repository: ghcr.io/pactproject/pact
   pullPolicy: IfNotPresent
-  tag: "9"
+  tag: "10"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -36,6 +36,7 @@ secretAccess:
 pact:
   stateProvider:
     config:
+      finalizers-enabled: "true"
       informer-resync-millis: "5000"
       informer-start-timeout-seconds: "30"
       status-retry-delays-millis: "100,200,400"

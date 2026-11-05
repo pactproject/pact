@@ -225,6 +225,13 @@ The rollback scenario forwards real HTTP calls and injects one 503 only after a
 successful permission deletion. It checks that `PactCore` recreates the original
 grant including CIDRs and can retry the desired transition afterward.
 
+The recreation enforcement case deletes a private repository and recreates it
+with the same key and a new ID. Downloads must be denied before repair; an equal
+declaration remains skipped after successful startup. A new core restores the
+declaration and performs startup repair, then verifies name/ID equivalence and
+revocation. Fake-client tests separately force orphan/duplicate rows independent
+of native cascade deletion.
+
 The enforcement suite requires `current`. Its CIDR scenario additionally needs
 `PACT_IT_ARTIFACT_KEEPER_ALLOWED_PROBE_URL`,
 `PACT_IT_ARTIFACT_KEEPER_DENIED_PROBE_URL`, and

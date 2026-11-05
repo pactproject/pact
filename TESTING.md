@@ -26,6 +26,7 @@ of a particular run. Report execution and skipped scenarios separately.
 | B09 | Client mapping, authentication, quoting/encoding, complete pagination, malformed responses and failed reads are tested. A partial catalog must never be treated as an empty or complete actual state. Test applicable timeout/retry behavior. | Local HTTP/HTTPS server or JDBC boundary, with live native semantics. |
 | B10 | Passwords, API tokens/keys and Authorization values are masked in errors, nested causes, logs and durable state. Preserve useful non-secret details. Persistent resources are closed, including initialization failures; closing does not revoke access. | Synthetic reflected-secret failures that also assert diagnostic details survive, state/status checks, client/application lifecycle tests. |
 | B11 | After failed rollback, apply the latest source declaration even when it equals the previous agreed state or is empty. Retain all attempted cleanup scopes through further failures; keep secrets out and clear uncertainty after success. | Core recovery tests plus scoped-plugin recovery tests. Runtime-only; restart persistence is not implemented. |
+| B12 | External rename/move/deletion/recreation preserves native object identity and permits safe in-scope cleanup. Document name versus ID selectors, cascade behavior and repair triggers; exercise the applicable matrix below. | Stateful resolver/backend tests, with real-service checks for deletion, reused names, enforcement and restart. |
 
 Every backend must cover B08 (an effective write followed by error/lost response,
 compensation and retry) and B11 as applicable to its scope. Every catalog read
@@ -39,6 +40,22 @@ Assert ordering only where correctness depends on it (for example, validation
 before writes or identity creation before grants). Independent deletes need
 not have a particular order. Do not require extra abstraction layers or tests
 that merely restate Java set operations.
+
+## External lifecycle matrix (B12)
+
+| Scenario | Required assertion |
+| --- | --- |
+| Rename/move, stable native ID | ID selectors retain the object; name/parent selectors follow documented semantics without broadening scope. Current equivalent references are a no-op. |
+| Missing desired target/principal | Fail before every write, including identity ensure, except explicitly supported principal creation. |
+| Missing previous target or orphan actual permission | Native cascade is converged; revoke remaining physical grant IDs precisely in scope without resolving a missing display name. Preserve duplicates; report safe failure when scope/type cannot be established. |
+| Reuse a name with a new ID; use an ID-looking name or repeat a name across parents/types/backends | Name selectors re-resolve on actual apply; old IDs never silently bind to replacements. Reject ambiguity and preserve typed identity and scope. |
+| Catalog error/incompleteness | Zero writes; do not infer deletion from authorization/transport failures, filtered data or missing pages. |
+| Change after prepare or during compensation | Preparation is read-only; apply rechecks. Compensation targets previous declarations and recoverable scope, and retry targets the latest source. |
+| Equal declaration, then startup/source transition | Establish the real repair trigger. Core's equality shortcut remains after successful startup; fresh caches are not periodic drift detection. |
+
+Apply this matrix to supported native objects/principals. Record non-applicable
+cases and coverage gaps explicitly. See
+[reference lifetime rules](BACKEND_DEVELOPMENT.md#external-deletion-recreation-and-reference-lifetime).
 
 ## Capability-dependent scenarios
 
@@ -82,6 +99,15 @@ Kubernetes startup aggregation and fail-closed validation are covered by
 [KubernetesStateProviderTest#startupValidationFailureDoesNotApplyAnyPartialDesiredState](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java), and
 [KubernetesStateProviderTest#startupApplyFailureKeepsLastSuccessfulStatusAndFinalizer](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java).
 
+Finalizer opt-out is covered by
+[KubernetesConfigTest#finalizersAreEnabledByDefaultAndCanBeDisabled](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/config/KubernetesConfigTest.java),
+[KubernetesConfigTest#rejectsInvalidFinalizerSetting](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/config/KubernetesConfigTest.java),
+[KubernetesStateProviderTest#disabledFinalizersStillReconcileStartupAndDeleteWithSharedAccess](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java),
+[KubernetesStateProviderTest#disablingFinalizersReleasesExistingOnesBeforeFailedStartupCleanup](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java), and
+[KubernetesStateProviderTest#disabledFinalizersRemoveExistingMarkerOnAddAndBeforeFailedDeleteCleanup](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesStateProviderTest.java).
+These use the mock API and a recording reconciler; they do not establish real
+API deletion timing or external backend enforcement in opt-out mode.
+
 Concrete assertions are in
 [PactCoreTest#preparesChangedBackendsBeforeApplyingAny](pact-core/src/test/java/io/github/pactproject/core/PactCoreTest.java),
 [PactCoreTest#doesNotRollBackPreparedTransactionsWhenPreparationFails](pact-core/src/test/java/io/github/pactproject/core/PactCoreTest.java),
@@ -97,6 +123,33 @@ input. Kubernetes additionally covers status/finalizer failure handling,
 secret-free restart snapshots, exclusive identity ownership, Secret versions,
 default ensure true, singular/list backend IDs and removal of one list member.
 These are shared provider guarantees; do not copy them into every backend.
+
+Artifact Keeper repository recreation and orphan cleanup are covered by
+[ArtifactKeeperNameResolutionTest#rebindsRecreatedRepositoryBetweenPrepareAndApplyAndKeepsIdEquivalentGrant](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperNameResolutionTest.java),
+[ArtifactKeeperNameResolutionTest#removesEveryOrphanGrantWithoutRewritingMatchingRecreatedRepositoryGrant](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperNameResolutionTest.java),
+[ArtifactKeeperNameResolutionTest#missingDesiredRepositoryNameOrIdStillPreventsOrphanCleanupAndIdentityWrites](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperNameResolutionTest.java),
+[ArtifactKeeperNameResolutionTest#compensationReappliesPreviousNamedGrantOnRecreatedRepositoryAfterPartialFailure](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperNameResolutionTest.java), and
+[ArtifactKeeperNameResolutionTest#failedRepositoryCatalogReadNeverTurnsIntoOrphanCleanup](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperNameResolutionTest.java).
+These fake-client scenarios verify permission CRUD planning and compensation;
+server-side deletion/recreation and authorization enforcement are not exercised.
+
+Additional B12 cases are
+[ArtifactKeeperNameResolutionTest#repositoryRenameKeepsIdBoundGrantAndInvalidatesOldNameWithoutWrites](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperNameResolutionTest.java) and
+[ArtifactKeeperNameResolutionTest#repositoryKeyEqualToOrphanUuidNeverAdoptsThatOrphanGrant](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperNameResolutionTest.java).
+[ArtifactKeeperEnforcementLiveIntegrationTest#startupRebindsRecreatedRepositoryWithoutTransferringOldGrantAndRevocationStillEnforces](pact-artifact-keeper/src/test/java/io/github/pactproject/artifactkeeper/ArtifactKeeperEnforcementLiveIntegrationTest.java)
+verifies real repository deletion/recreation, a new ID, denied downloads before
+repair, the equality shortcut, startup repair, name/ID no-op and revocation.
+Fake tests independently force orphan/duplicate rows without relying on cascade.
+[KubernetesLiveIntegrationTest#preservesGenericFieldsAndProcessesTheFullResourceLifecycle](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesLiveIntegrationTest.java)
+runs against the real API with finalizers enabled and disabled.
+[KubernetesArtifactKeeperLiveIntegrationTest#optOutReleasesDeletingResourceBeforeFailedStartupCleanupOnRealApi](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesArtifactKeeperLiveIntegrationTest.java)
+verifies real deletion after opt-out with retained external grants after an
+injected reconciler failure. It does not simulate a network outage.
+
+B12 is a requirement, not a claim of complete existing coverage. Grafana has
+missing/renamed/moved object cases; PostgreSQL, Ranger and Elasticsearch have
+reference/recovery suites but not a complete external-object/principal
+delete/recreate matrix. Their native selectors and scope remain module-specific.
 
 Packaged plugin discovery and shared API class identity are exercised by
 [PluginLoaderTest#discoversPackagedBackendWithSharedApiAndIndependentInstanceIds](pact-app/src/test/java/io/github/pactproject/app/plugin/PluginLoaderTest.java).

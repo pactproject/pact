@@ -6,7 +6,6 @@ import io.github.pactproject.api.PactState;
 import io.github.pactproject.api.exception.BackendException;
 import io.github.pactproject.api.exception.BackendOperationException;
 import io.github.pactproject.api.exception.ValidationException;
-import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiRepository;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperApiUser;
 import io.github.pactproject.artifactkeeper.api.ArtifactKeeperClient;
 import io.github.pactproject.artifactkeeper.client.ArtifactKeeperClientException;
@@ -194,7 +193,7 @@ public final class ArtifactKeeperBackend
             ArtifactKeeperDiff.PermissionDiff diff, ArtifactKeeperState state)
             throws BackendOperationException, ValidationException
     {
-        deletePermissions(diff.delete());
+        deletePermissions(diff.delete(), state);
         // Only newly ensured users need a local cache; the permission diff is immutable.
         Map<String, ArtifactKeeperApiUser> createdUsers = new HashMap<>();
         for (ArtifactKeeperPermission permission : diff.create()) {
@@ -203,13 +202,19 @@ public final class ArtifactKeeperBackend
     }
 
     private void deletePermissions(
-            List<ActualArtifactKeeperPermission> permissions)
+            List<ActualArtifactKeeperPermission> permissions, ArtifactKeeperState state)
             throws BackendOperationException
     {
         for (ActualArtifactKeeperPermission permission
                 : permissions) {
 
             try {
+                if (permission.targetType().equals("repository")
+                        && !state.containsRepository(permission.target())) {
+                    log.warn("backend={} action=delete_orphan_permission result=started permission_id={} "
+                                    + "target_type=repository target_id={} reason=repository_absent_from_catalog",
+                            id, permission.id(), permission.target());
+                }
                 log.debug("backend={} action=delete_permission result=started permission={}", id, permission);
                 client.deletePermission(
                         permission.id()
@@ -240,8 +245,7 @@ public final class ArtifactKeeperBackend
             principalId = user.id();
             principalType = user.principalType();
         }
-        String targetId = permission.targetType().equals("repository")
-                ? repositoryByName(permission.target(), state).id() : permission.target();
+        String targetId = permission.target();
 
         try {
             log.debug("backend={} action=create_permission result=started principal={} principal_type={} target_type={} target={} actions={} conditions={}",
@@ -322,19 +326,4 @@ public final class ArtifactKeeperBackend
         }
     }
 
-    private ArtifactKeeperApiRepository repositoryByName(
-            String name, ArtifactKeeperState state)
-            throws ValidationException
-    {
-        try {
-            return state.repositoryByKey(name);
-        }
-        catch (IllegalArgumentException e) {
-            throw new ValidationException(
-                    "Artifact Keeper repository not found: "
-                            + name,
-                    e
-            );
-        }
-    }
 }

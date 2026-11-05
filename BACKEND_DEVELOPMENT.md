@@ -131,6 +131,49 @@ configured scope as the source of truth. Explain destructive consequences
 prominently and test both default full-scope behavior and any
 preserve-unmanaged opt-in.
 
+## External deletion, recreation and reference lifetime
+
+Objects and principals can be renamed, moved, deleted or recreated between
+reconciliations and between preparation and apply. Reusing a name does not
+establish the same identity. Document selectors that follow names versus those
+bound to native IDs, retaining target type, parent scope, version/signature and
+backend instance. Re-resolve current desired references on each application and
+compare canonical native identities where the service exposes them. An ID-looking
+name must not adopt another object's grants. Services whose identity is a native
+name need an explicit contract rather than an invented durable ID.
+
+Distinguish the following cases:
+
+- Missing or ambiguous desired references fail before all permission and
+  identity writes. Do not drop declarations or create external targets to
+  satisfy them; documented principal ensure/create capabilities remain explicit.
+- Actual permissions may outlive their target or principal. When native IDs and
+  ownership/scope metadata allow precise in-scope revocation, retain every
+  physical permission ID, including duplicates, and reconcile without a missing
+  display-name lookup. Never transfer grants merely because a name is reused.
+  Native cascade removal is already converged. If safe scope/type cannot be
+  established, return a checked, actionable error rather than guess.
+- Missing previous targets must not block precise final-removal cleanup when
+  the native API supports it. Retain recoverable old/attempted scopes and respect
+  the previous declaration's selector semantics.
+- Failed, filtered, incomplete or malformed catalogs do not prove deletion.
+  Require complete authoritative reads and service-account privileges; errors
+  stop writes. Distinguish exact not-found responses from authorization and
+  transport errors.
+
+Recheck references in apply: preparation is not a remote lock. Compensation
+reapplies previous agreed declarations within recoverable scope; it does not
+resurrect deleted targets, restore unknown accounts/passwords or re-adopt orphan
+external drift. Specify failure/retry behavior if rollback references disappear
+or names are reused. A retry must target the latest source declaration.
+
+Document the repair trigger. Fresh per-apply lookups do not imply periodic drift
+repair: after startup core normally skips equal declarations, and Kubernetes
+resync alone does not refresh external names. Test direct apply and supported
+startup/source transitions. Log backend ID, native object/permission IDs, target
+type and phase so aggregated-state failures are distinguishable from the event
+that exposed them. The required lifecycle matrix is B12 in [TESTING.md](TESTING.md).
+
 ## Recommended module structure
 
 Follow the repository's Java/Maven plugin conventions and use only the layers
@@ -267,7 +310,7 @@ native catalog, plus zero writes after a failed/incomplete read. A successful
 two-page example alone does not establish that contract.
 
 The canonical checklist, concrete test references, complete suite inventory and
-known coverage gaps are in [TESTING.md](TESTING.md). Meet B01–B11 and applicable
+known coverage gaps are in [TESTING.md](TESTING.md). Meet B01–B12 and applicable
 C01–C05 for a new backend; when updating an existing one, add missing scenarios
 for the affected behavior and update its evidence/gap entries. Keep the module
 README, implementation and assertions in the same change. Validate references

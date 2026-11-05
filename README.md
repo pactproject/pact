@@ -191,13 +191,13 @@ secret mechanism rather than baking them into the image.
 
 GitHub Actions builds the image for pull requests and publishes it to GHCR
 when an image version tag is pushed. Prefix release tags with `image-v`; for
-example, to publish and pull release `9`:
+example, to publish and pull release `10`:
 
 ```shell
-python integration/scripts/check-release.py 9
-git tag image-v9
-git push origin image-v9
-docker pull ghcr.io/pactproject/pact:9
+python integration/scripts/check-release.py 10
+git tag image-v10
+git push origin image-v10
+docker pull ghcr.io/pactproject/pact:10
 ```
 
 GHCR package visibility is managed in GitHub; make the package public there if

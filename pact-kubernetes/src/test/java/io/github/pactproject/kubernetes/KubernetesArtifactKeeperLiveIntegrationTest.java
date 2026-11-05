@@ -48,6 +48,45 @@ class KubernetesArtifactKeeperLiveIntegrationTest {
     @TempDir Path temp;
 
     @Test
+    void optOutReleasesDeletingResourceBeforeFailedStartupCleanupOnRealApi() throws Exception {
+        try (var fixture = new Fixture()) {
+            var config = ArtifactKeeperControllerProcess.kubernetesConfig();
+            var core = new PactCore(List.of(new ArtifactKeeperBackend("packages", fixture.ak)));
+            try (var provider = new KubernetesStateProvider(new KubernetesClientBuilder().build(), config)) {
+                provider.start(new ArtifactKeeperControllerProcess.CoreReconciler(core));
+                fixture.createDataAccess();
+                fixture.awaitReady();
+            }
+            var grants = fixture.permissions();
+            assertFalse(grants.isEmpty());
+            fixture.resources().withName(fixture.name).delete();
+            var deleting = fixture.resources().withName(fixture.name).get();
+            assertNotNull(deleting);
+            assertNotNull(deleting.getMetadata().getDeletionTimestamp());
+            assertTrue(deleting.getMetadata().getFinalizers().contains(config.group() + "/data-access"));
+            var disabled = new io.github.pactproject.kubernetes.config.KubernetesConfig(
+                    config.group(), config.version(), config.plural(), config.informerResyncMillis(),
+                    config.informerStartTimeoutSeconds(), config.statusRetryDelaysMillis(), false);
+            try (var provider = new KubernetesStateProvider(new KubernetesClientBuilder().build(), disabled)) {
+                assertThrows(io.github.pactproject.api.exception.StateProviderException.class,
+                        () -> provider.start(new io.github.pactproject.api.StateReconciler() {
+                            @Override public void restoreAppliedState(PactState state) {
+                                assertFalse(state.accesses().isEmpty(), "Persisted snapshot must be read before it is lost");
+                            }
+                            @Override public void apply(PactState state)
+                                    throws io.github.pactproject.api.exception.StateReconciliationException {
+                                assertTrue(state.accesses().isEmpty());
+                                throw new io.github.pactproject.api.exception.StateReconciliationException(
+                                        "Synthetic cleanup outage", new java.io.IOException("Fixture backend unavailable"));
+                            }
+                        }));
+                await(() -> fixture.resources().withName(fixture.name).get() == null, "opt-out releases real API deletion");
+                assertEquals(grants, fixture.permissions(), "Opt-out cannot guarantee cleanup after backend failure");
+            }
+        }
+    }
+
+    @Test
     void reconcilesNamedYamlMixedPrincipalsAndFlatCidrsThroughRealKubernetes() throws Exception {
         try (var fixture = new Fixture()) {
             var backend = new ArtifactKeeperBackend("packages", fixture.ak, ArtifactKeeperApiProfile.CURRENT);

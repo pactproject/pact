@@ -15,11 +15,11 @@ helm upgrade --install pact .\charts\pact `
   --namespace pact-system `
   --create-namespace `
   --set image.repository=registry.example/pact `
-  --set image.tag=9 `
+  --set image.tag=10 `
   --values .\pact-values.yaml
 ```
 
-The chart's default image is `ghcr.io/pactproject/pact:9`. Set a repository
+The chart's default image is `ghcr.io/pactproject/pact:10`. Set a repository
 and version explicitly for the features required by your deployment.
 
 The chart installs a `DataAccess` CRD by default. Set `crd.create: false` when
@@ -72,6 +72,15 @@ parsing the YAML configuration. Keep passwords out of Helm values and the
 generated ConfigMap; inject them from Kubernetes Secrets using `extraEnv`.
 Unset references cause configuration loading to fail. Environment substitution
 is a PACT config-file feature and applies to all string values.
+
+Finalizers are enabled by default. To allow DataAccess deletion without waiting
+for backend cleanup, set `pact.stateProvider.config.finalizers-enabled: "false"`
+and restart the controller. It removes existing PACT finalizers, including on
+deleting resources, even if cleanup fails; other finalizers remain intact.
+Cleanup then depends on receiving and successfully processing delete events.
+Deleting resources while the controller is offline or restarting after a failed
+cleanup can leave external grants. See the
+[provider lifecycle and migration details](../../pact-kubernetes/README.md#configuration).
 
 ## Backend CA certificates and init containers
 
