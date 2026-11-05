@@ -145,11 +145,31 @@ runs against the real API with finalizers enabled and disabled.
 [KubernetesArtifactKeeperLiveIntegrationTest#optOutReleasesDeletingResourceBeforeFailedStartupCleanupOnRealApi](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesArtifactKeeperLiveIntegrationTest.java)
 verifies real deletion after opt-out with retained external grants after an
 injected reconciler failure. It does not simulate a network outage.
+[KubernetesArtifactKeeperLiveIntegrationTest#recreatedRepositoryThenDeletedAndRecreatedDataAccessUsesNewUidsAndRevokesOldGrants](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesArtifactKeeperLiveIntegrationTest.java)
+runs the exact repository-recreation/delete/recreate chain in both finalizer
+modes and checks new Kubernetes/AK IDs plus removal of old physical grants.
+[KubernetesArtifactKeeperLiveIntegrationTest#startupCleansDeletingDataAccessAfterRepositoryRecreationAndAllowsSameNameAgain](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesArtifactKeeperLiveIntegrationTest.java)
+covers a persisted deleting resource and startup cleanup.
+[KubernetesArtifactKeeperLiveIntegrationTest#overlappingDataAccessKeepsEqualAggregateAndRequiresStartupToRepairRecreatedRepository](pact-kubernetes/src/test/java/io/github/pactproject/kubernetes/KubernetesArtifactKeeperLiveIntegrationTest.java)
+characterizes the equality shortcut when another declaration retains identical
+accesses, then verifies startup repair and independent declaration removal.
 
-B12 is a requirement, not a claim of complete existing coverage. Grafana has
-missing/renamed/moved object cases; PostgreSQL, Ranger and Elasticsearch have
-reference/recovery suites but not a complete external-object/principal
-delete/recreate matrix. Their native selectors and scope remain module-specific.
+B12 coverage for the remaining native models is now explicit:
+
+| Backend | Concrete lifecycle assertions |
+| --- | --- |
+| Grafana | [GrafanaBackendTest#recreatedFolderAfterPrepareRequiresRetryAndNeverFollowsAnOldUid](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java), [GrafanaBackendTest#recreatedLoginAfterPrepareFailsBeforeWritesThenRetryUsesCurrentUserId](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java), and [GrafanaBackendTest#recreatedNamedFolderIsRepairedOnStartupButNotByEqualSourceInRunningCore](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaBackendTest.java) cover binding races and repair triggers. [GrafanaLiveIntegrationTest#recreatedDashboardTitleNeedsFreshPreparationAndRevokesTheReplacement](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaLiveIntegrationTest.java) and [GrafanaLiveIntegrationTest#recreatedLoginGetsOnlyFreshlyResolvedUserAclAndNeverUsesPreparedOldId](pact-grafana/src/test/java/io/github/pactproject/grafana/GrafanaLiveIntegrationTest.java) verify real UIDs/user IDs, access and revocation. |
+| PostgreSQL | [PostgreSqlLiveIntegrationTest#recreatedTableHasNewOidAndNameBoundGrantsRepairOnlyWhenReconciled](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlLiveIntegrationTest.java) and [PostgreSqlLiveIntegrationTest#recreatedRoleUsesCurrentOidAndKeepsItsManualPasswordWhenGrantNamesAreReapplied](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlLiveIntegrationTest.java) cover native OID replacement under exact names. [PostgreSqlLiveIntegrationTest#removedTargetAfterPrepareFailsBeforeEnsuringAnyIdentity](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlLiveIntegrationTest.java) runs for all seven target levels. [PostgreSqlLiveIntegrationTest#removedPreviousDatabaseDoesNotBlockCleanupOfRemainingDatabase](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlLiveIntegrationTest.java) covers native cascade and retained cleanup scope. [PostgreSqlBackendTest#changedGrantReferencesAfterPreparationPreventIdentityAndAclWrites](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlBackendTest.java) asserts orchestration before writes. |
+| Ranger | [RangerBackendTest#recreatedPolicyUsesCurrentPhysicalIdAfterPreparationAndCleanup](pact-ranger/src/test/java/io/github/pactproject/ranger/RangerBackendTest.java), [RangerBackendTest#changedServiceDefinitionAfterPrepareFailsBeforeAnyPrincipalOrPolicyWrite](pact-ranger/src/test/java/io/github/pactproject/ranger/RangerBackendTest.java), and [RangerBackendTest#missingAccessDrivenPrincipalIsEnsuredEvenWhenPolicyAlreadyMatches](pact-ranger/src/test/java/io/github/pactproject/ranger/RangerBackendTest.java) cover fresh policy IDs, catalogs and ensure. All four [RangerLiveIntegrationTest](pact-ranger/src/test/java/io/github/pactproject/ranger/RangerLiveIntegrationTest.java) service scenarios replace a real policy ID between prepare/apply and verify cleanup. Target application object identity/enforcement is outside Ranger's API fixture. |
+| Elasticsearch | [ElasticsearchBackendTest#removedPreviousUserDoesNotBlockOwnedRoleCleanupOrTouchOtherUsers](pact-elasticsearch/src/test/java/io/github/pactproject/elasticsearch/ElasticsearchBackendTest.java), [ElasticsearchBackendTest#missingDesiredUserAfterPrepareFailsBeforeAnyOtherUserCanBeEnsured](pact-elasticsearch/src/test/java/io/github/pactproject/elasticsearch/ElasticsearchBackendTest.java), [ElasticsearchBackendTest#recreatedNativeUsernameFollowsCurrentProfileWithoutCreatingOrRotatingCredentials](pact-elasticsearch/src/test/java/io/github/pactproject/elasticsearch/ElasticsearchBackendTest.java), and [ElasticsearchBackendTest#recreatedSharedRoleUsesItsNativeNameWithoutEditingTheReplacementDefinition](pact-elasticsearch/src/test/java/io/github/pactproject/elasticsearch/ElasticsearchBackendTest.java) cover name identity and both modes. [ElasticsearchLiveIntegrationTest#recreatedIndexAndNativeUsernameFollowNamesWhileRevocationAndOutsideBoundaryRemainEffective](pact-elasticsearch/src/test/java/io/github/pactproject/elasticsearch/ElasticsearchLiveIntegrationTest.java) verifies native index-name privileges, deleted/recreated users, boundaries and revocation. Index UUID binding is not a supported declaration; future matching index names are valid. |
+
+This is scenario coverage, not proof of every possible concurrent interleaving
+or a hard kill during native mutation. PostgreSQL has no public OID selector;
+Ranger external paths/topics and Elasticsearch index patterns use native name
+semantics. Ranger's removed-user case uses a stateful fake and the separately
+tested HTTP ensure adapter; native user deletion is not exercised. Full service
+deletion/recreation and external privilege-catalog changes during every write
+remain limits; failed reads are never interpreted as deletion.
 
 Packaged plugin discovery and shared API class identity are exercised by
 [PluginLoaderTest#discoversPackagedBackendWithSharedApiAndIndependentInstanceIds](pact-app/src/test/java/io/github/pactproject/app/plugin/PluginLoaderTest.java).
@@ -194,6 +214,7 @@ when introducing new paths.
 PostgreSQL ownership suites:
 
 - [JdbcOwnershipTest](pact-postgresql/src/test/java/io/github/pactproject/postgresql/client/JdbcOwnershipTest.java): quoted DDL, read-only resolution, matching-owner no-op, missing/duplicate/malformed catalog references, canonical routine conflicts and sequence dependencies before writes.
+- [JdbcReferencesTest](pact-postgresql/src/test/java/io/github/pactproject/postgresql/client/JdbcReferencesTest.java): missing/duplicate/malformed native rows, bound names/quoted routine references, read-only identity validation, LOGIN requirements and password-safe errors.
 - [PostgreSqlOwnershipLiveIntegrationTest](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlOwnershipLiveIntegrationTest.java): opt-in PostgreSQL 18 ownership through filesystem and Kubernetes compilation/core, database/schema/table/view/materialized-view/partition/sequence/routine targets, native serial/identity dependencies, child boundaries, real owner DDL and SECURITY DEFINER execution, final-owner defaults, declared-owner compensation, lost commit responses, cross-database failure/retry and startup repair.
 
 [PostgreSqlBackendTest#ownershipPreparationIsReadOnlyAndRollbackRestoresOnlyDeclaredOwners](pact-postgresql/src/test/java/io/github/pactproject/postgresql/PostgreSqlBackendTest.java)

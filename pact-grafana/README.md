@@ -192,6 +192,13 @@ startup; afterward it skips ordinary unchanged declarations. A rename alone
 does not trigger a backend reconciliation; there is no unconditional external-
 drift repair.
 
+The B12 regression suite also replaces a dashboard or login between preparation
+and apply. Grafana has durable object UIDs and numeric user IDs, so those races
+require fresh preparation with zero ACL writes. A retry resolves the current
+name/login, while an explicit old UID never follows a same-titled replacement.
+Live scenarios verify the replacement's real read/denial and revocation; fake
+scenarios additionally characterize unchanged-core skip versus startup repair.
+
 ## Identity reconciliation
 
 Unlike the PostgreSQL backend, this plugin does not implement identity

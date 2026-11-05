@@ -31,6 +31,37 @@ class ElasticsearchLiveIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
+    void recreatedIndexAndNativeUsernameFollowNamesWhileRevocationAndOutsideBoundaryRemainEffective() throws Exception {
+        try (var f = new Fixture(ElasticsearchReconciliationMode.AUTHORITATIVE)) {
+            String user = f.createUser("recreated-reader"), index = f.index("logs"), outside = f.index("private");
+            f.admin("PUT", "/" + index + "/_doc/1?refresh=true", "{}", 201);
+            f.admin("PUT", "/" + outside + "/_doc/1?refresh=true", "{}", 201);
+            var desired = new PactState(Set.of(indices(user, index, "read")));
+            f.backend.prepareTransaction(PactState.empty(), desired).apply();
+            f.as(user, "Fixture-it-Dd4!", "GET", "/" + index + "/_search", null, 200);
+            var role = f.client.getRole(roleName(user)).deepCopy();
+            f.admin("DELETE", "/" + index, null, 200);
+            f.admin("PUT", "/" + index + "/_doc/1?refresh=true", "{}", 201);
+            // Index privileges are native name/pattern selectors, not UUID bindings.
+            f.as(user, "Fixture-it-Dd4!", "GET", "/" + index + "/_search", null, 200);
+            f.as(user, "Fixture-it-Dd4!", "GET", "/" + outside + "/_search", null, 403);
+            var pending = f.backend.prepareTransaction(desired, desired);
+            f.admin("DELETE", "/_security/user/" + user, null, 200);
+            assertThrows(BackendOperationException.class, pending::apply);
+            assertEquals(role, f.client.getRole(roleName(user)));
+            f.client.putUser(user, JSON.readTree("{\"password\":\"Recreated-it-Name2!\",\"roles\":[],\"full_name\":\"Replacement profile\"}"));
+            f.as(user, "Recreated-it-Name2!", "GET", "/" + index + "/_search", null, 403);
+            f.backend.prepareTransaction(desired, desired).apply();
+            assertEquals("Replacement profile", f.client.getUser(user).path("full_name").asText());
+            f.as(user, "Recreated-it-Name2!", "GET", "/" + index + "/_search", null, 200);
+            f.as(user, "Recreated-it-Name2!", "GET", "/" + outside + "/_search", null, 403);
+            f.backend.prepareTransaction(desired, PactState.empty()).apply();
+            f.as(user, "Recreated-it-Name2!", "GET", "/" + index + "/_search", null, 403);
+            assertNull(f.client.getRole(roleName(user)));
+        }
+    }
+
+    @Test
     void enforcesIndexAndClusterPrivilegesAndRotatesOnlyExplicitSecrets() throws Exception {
         try (var f = new Fixture(ElasticsearchReconciliationMode.MANAGED)) {
             String user = f.user("reader"), index = f.index("logs"), other = f.index("private");

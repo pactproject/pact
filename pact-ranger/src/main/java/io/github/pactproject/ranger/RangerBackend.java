@@ -108,7 +108,7 @@ public final class RangerBackend implements Backend {
                             desired.size(),
                             id
                     );
-                    synchronize(desired);
+                    synchronize(desiredState);
                     log.info(
                             "Applied Ranger policies for backend '{}'",
                             id
@@ -122,16 +122,24 @@ public final class RangerBackend implements Backend {
                             previous.size(),
                             id
                     );
-                    synchronize(previous);
+                    synchronize(previousState);
                     log.info(
                             "Restored Ranger policies for backend '{}'",
                             id
                     );
                 }
 
-                private void synchronize(List<? extends JsonNode> target)
+                private void synchronize(PactState source)
                         throws BackendException {
                     try {
+                        String currentType = client.getServiceType(config.serviceName());
+                        if (!serviceType.equals(currentType)) {
+                            throw new IllegalArgumentException("Ranger service type changed after preparation; retry reconciliation");
+                        }
+                        var currentDefinition = RangerServiceDefinition.parse(
+                                client.getServiceDefinition(currentType), currentType);
+                        var target = RangerPolicyCompiler.compile(source, currentDefinition,
+                                id, currentType, config.serviceName());
                         sync.synchronize(sync.getPolicies(), target);
                     }
                     catch (RangerClientException

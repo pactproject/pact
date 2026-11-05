@@ -32,6 +32,23 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PostgreSqlBackendTest {
     @Test
+    void changedGrantReferencesAfterPreparationPreventIdentityAndAclWrites() throws Exception {
+        var client = new FakeClient();
+        var backend = new PostgreSqlBackend("postgres", client);
+        var initial = state("alice", "app", "CONNECT");
+        var desired = new PactState(initial.accesses(), Set.of(new Identity("postgres", "new-role", true, null, null, null)));
+        var pending = backend.prepareTransaction(PactState.empty(), desired);
+        assertEquals(1, client.referenceChecks);
+        client.failReferenceValidation = true;
+        assertThrows(BackendOperationException.class, pending::apply);
+        assertEquals(2, client.referenceChecks);
+        assertTrue(client.operations.isEmpty());
+        assertTrue(client.desiredIdentities.isEmpty());
+        assertThrows(BackendOperationException.class, () -> backend.prepareTransaction(PactState.empty(), desired));
+        assertTrue(client.operations.isEmpty());
+    }
+
+    @Test
     void ownershipPreparationIsReadOnlyAndRollbackRestoresOnlyDeclaredOwners() throws Exception {
         var client = new FakeClient();
         var backend = new PostgreSqlBackend("postgres", client);
@@ -285,11 +302,20 @@ class PostgreSqlBackendTest {
         private final Set<DefaultPrivilegeGrant> actualDefaults = new HashSet<>();
         private final Map<GrantTarget, String> actualOwners = new java.util.HashMap<>();
         private boolean failOwnershipValidation;
+        private boolean failReferenceValidation;
+        private int referenceChecks;
         private Set<Identity> desiredIdentities = Set.of();
         private final List<String> operations = new ArrayList<>();
         private boolean failOnRead;
         private String failBeforeDatabase;
         private int identityReconciliationCount;
+
+        @Override
+        public void validateReferences(Set<Grant> grants, Set<DefaultPrivilegeGrant> defaults,
+                Set<Identity> identities) throws PostgreSqlClientException {
+            referenceChecks++;
+            if (failReferenceValidation) throw new PostgreSqlClientException("Desired reference disappeared");
+        }
 
         @Override
         public void validateOwnerships(Set<Ownership> desired, Set<String> ensuredRoles)

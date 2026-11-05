@@ -211,6 +211,18 @@ class RangerLiveIntegrationTest {
                     idempotentPolicy.path("conditions").toString()
             );
 
+            BackendTransaction beforeRecreation = backend.prepareTransaction(updated, updated);
+            transactions.add(beforeRecreation);
+            long oldId = idempotentPolicy.path("id").asLong();
+            client.deletePolicy(oldId);
+            var body = io.github.pactproject.ranger.compile.RangerPolicyCompiler.compile(
+                    updated, definition, serviceType, serviceType, serviceName).getFirst();
+            long replacementId = client.createPolicy(body).path("id").asLong();
+            org.junit.jupiter.api.Assertions.assertNotEquals(oldId, replacementId);
+            beforeRecreation.apply();
+            assertEquals(replacementId, sync.getPoliciesInScope().getFirst().path("id").asLong(),
+                    "Reconciliation must use the replacement's current physical ID without rewriting it");
+
             BackendTransaction delete = backend.prepareTransaction(updated, PactState.empty());
             transactions.add(delete);
             delete.apply();

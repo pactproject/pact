@@ -215,6 +215,10 @@ class PostgreSqlOwnershipLiveIntegrationTest {
     }
 
     private record FaultingClient(JdbcPostgreSqlClient delegate, AtomicBoolean fail) implements PostgreSqlClient {
+        public void validateReferences(Set<Grant> grants, Set<DefaultPrivilegeGrant> defaults, Set<Identity> identities)
+                throws PostgreSqlClientException {
+            delegate.validateReferences(grants, defaults, identities);
+        }
         public Set<Grant> getManagedGrants(Set<String> databases) throws PostgreSqlClientException {
             return delegate.getManagedGrants(databases);
         }

@@ -253,3 +253,16 @@ additional Kubernetes/Artifact Keeper scenario starts from a persisted deleting
 resource, disables finalizers and injects a cleanup failure. It verifies that
 the API completes deletion while the backend grants remain, making the opt-out
 tradeoff explicit rather than asserting that removal guarantees revocation.
+
+Repository recreation tests delete an AK repository, recreate its key with a
+new ID, delete the DataAccess and create the same Kubernetes name with a new
+UID. Both finalizer modes resolve grants to the replacement repository and
+remove old physical permission IDs. The enabled mode also covers deletion
+while the controller is stopped and cleanup on startup. Wait for Kubernetes
+deletion to finish before creating the same DataAccess name again.
+
+Replacing one of two declarations with identical accesses leaves their
+aggregate unchanged and does not force backend reconciliation. A separate live
+test verifies this limit and repairs the recreated repository on controller
+startup. Finalizer opt-out keeps cleanup best effort, including after missed
+events or controller downtime.

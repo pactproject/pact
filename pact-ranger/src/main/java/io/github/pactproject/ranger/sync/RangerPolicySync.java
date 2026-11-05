@@ -113,11 +113,8 @@ public final class RangerPolicySync {
         }
 
         Set<String> users = new java.util.TreeSet<>();
-        for (JsonNode create : creates) {
-            collectUsers(create, users);
-        }
-        for (Update update : updates) {
-            collectUsers(update.policy(), users);
+        for (JsonNode policy : desired) {
+            collectUsers(policy, users);
         }
         for (String user : users) {
             log.debug("backend={} service={} action=ensure_user result=started principal={}", backendId, serviceName, user);

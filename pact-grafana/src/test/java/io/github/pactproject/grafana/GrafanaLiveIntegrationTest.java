@@ -78,6 +78,50 @@ class GrafanaLiveIntegrationTest {
         }
     }
 
+    @Test void recreatedDashboardTitleNeedsFreshPreparationAndRevokesTheReplacement() throws Exception {
+        var counted = new ForwardingClient(nativeClient);
+        var backend = new GrafanaBackend("monitoring", counted);
+        var desired = state(access(principal, Map.of("folderUid", nestedUid, "dashboard", "CPU / Usage"), "View"));
+        var pending = backend.prepareTransaction(PactState.empty(), desired);
+        String oldUid = dashboardUid;
+        assertEquals(200, call("DELETE", "api/dashboards/uid/" + oldUid, null, admin).statusCode());
+        dashboardUid = "pact-recreated-" + UUID.randomUUID().toString().substring(0, 12);
+        createDashboard(dashboardUid, nestedUid);
+        nativeClient.replacePermissions(dashboard(dashboardUid), List.of());
+        assertDenied(dashboardUid);
+        assertThrows(io.github.pactproject.api.exception.ValidationException.class, pending::apply);
+        assertEquals(0, counted.writes);
+        assertThrows(io.github.pactproject.api.exception.ValidationException.class,
+                () -> backend.apply(state(access(principal, Map.of("dashboardUid", oldUid), "View"))));
+        backend.prepareTransaction(PactState.empty(), desired).apply();
+        assertEquals(200, call("GET", "api/dashboards/uid/" + dashboardUid, null, readerAuth).statusCode());
+        assertEquals(404, call("GET", "api/dashboards/uid/" + oldUid, null, admin).statusCode());
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertDenied(dashboardUid);
+    }
+
+    @Test void recreatedLoginGetsOnlyFreshlyResolvedUserAclAndNeverUsesPreparedOldId() throws Exception {
+        var counted = new ForwardingClient(nativeClient);
+        var backend = new GrafanaBackend("monitoring", counted);
+        var desired = state(access(principal, Map.of("dashboardUid", dashboardUid), "View"));
+        var pending = backend.prepareTransaction(PactState.empty(), desired);
+        long oldId = userId;
+        assertEquals(200, call("DELETE", "api/admin/users/" + oldId, null, admin).statusCode());
+        password = UUID.randomUUID().toString();
+        userId = create("api/admin/users", Map.of("name", principal, "email", principal + "@example.invalid",
+                "login", principal, "password", password)).path("id").asLong();
+        assertNotEquals(oldId, userId);
+        readerAuth = basic(principal, password);
+        assertThrows(io.github.pactproject.api.exception.ValidationException.class, pending::apply);
+        assertEquals(0, counted.writes);
+        assertDenied(dashboardUid);
+        backend.prepareTransaction(PactState.empty(), desired).apply();
+        assertEquals(List.of(GrafanaPermission.user(userId, 1)), nativeClient.permissions(dashboard(dashboardUid)));
+        assertEquals(200, call("GET", "api/dashboards/uid/" + dashboardUid, null, readerAuth).statusCode());
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertDenied(dashboardUid);
+    }
+
     @Test void filesystemAndKubernetesDeclarationsEnforceNamedUidPermissionsAndRevocation() throws Exception {
         assertDenied(dashboardUid);
         assertDenied(unrelatedUid);

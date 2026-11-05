@@ -204,7 +204,8 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             throws PostgreSqlClientException {
         Set<Grant> result = new HashSet<>();
         for (String database : new java.util.TreeSet<>(databases)) {
-            try (Connection connection = connect(database)) {
+            try (Connection connection = connectScopeDatabase(database, false)) {
+                if (connection == null) continue;
                 verifyAuthoritativeSuperuser(connection);
                 try (Statement statement = connection.createStatement()) {
                     statement.execute("SET search_path TO pg_catalog");
@@ -234,7 +235,8 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             Set<DefaultPrivilegeScope> databaseScopes = scopes.stream()
                     .filter(scope -> scope.database().equals(database))
                     .collect(java.util.stream.Collectors.toSet());
-            try (Connection connection = connect(database)) {
+            try (Connection connection = connectScopeDatabase(database, false)) {
+                if (connection == null) continue;
                 verifyAuthoritativeSuperuser(connection);
                 try (Statement statement = connection.createStatement()) {
                     statement.execute("SET search_path TO pg_catalog");
@@ -255,6 +257,36 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             }
         }
         return Set.copyOf(result);
+    }
+
+    @Override
+    public void validateReferences(Set<Grant> grants, Set<DefaultPrivilegeGrant> defaults,
+            Set<Identity> identities) throws PostgreSqlClientException {
+        Set<String> ensured = identities.stream().filter(Identity::ensure).map(Identity::principal)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        if (!identities.isEmpty()) {
+            try (Connection connection = connectConfiguredDatabase()) {
+                verifyAuthoritativeSuperuser(connection);
+                connection.setReadOnly(true);
+                JdbcReferences.identities(connection, identities);
+            } catch (SQLException | RuntimeException e) {
+                throw new PostgreSqlClientException("Failed to validate PostgreSQL identity references", e);
+            }
+        }
+        Set<String> databases = grants.stream().map(Grant::database)
+                .collect(java.util.stream.Collectors.toCollection(java.util.TreeSet::new));
+        defaults.forEach(value -> databases.add(value.scope().database()));
+        for (String database : databases) {
+            try (Connection connection = connect(database)) {
+                verifyAuthoritativeSuperuser(connection);
+                connection.setReadOnly(true);
+                connection.setSchema("pg_catalog");
+                JdbcReferences.grants(connection, database, grants, defaults, ensured);
+            } catch (SQLException | RuntimeException e) {
+                throw new PostgreSqlClientException("Failed to validate PostgreSQL references in database '"
+                        + database + "'", e);
+            }
+        }
     }
 
     @Override
@@ -351,6 +383,9 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             Set<DefaultPrivilegeGrant> desiredDefaults, Set<DefaultPrivilegeScope> defaultScopes,
             Set<DefaultPrivilegeOverride> overrides, Set<Ownership> ownerships)
             throws PostgreSqlClientException {
+        // Identities have been ensured by the backend. Recheck every desired
+        // reference across databases before even the first ACL transaction.
+        validateReferences(desired, desiredDefaults, Set.of());
         if (!ownerships.isEmpty()) {
             requireOwnershipMode();
             if (ownerships.stream().anyMatch(owner -> !databases.contains(owner.target().database()))) {
@@ -385,7 +420,11 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
         // Each database needs its own connection, so the sync is atomic per
         // database only; the backend transaction compensates across databases.
         for (String database : new java.util.TreeSet<>(databases)) {
-            try (Connection connection = connect(database)) {
+            boolean required = desired.stream().anyMatch(grant -> database.equals(grant.database()))
+                    || desiredDefaults.stream().anyMatch(grant -> database.equals(grant.scope().database()))
+                    || ownerships.stream().anyMatch(owner -> database.equals(owner.target().database()));
+            try (Connection connection = connectScopeDatabase(database, required)) {
+                if (connection == null) continue;
                 verifyAuthoritativeSuperuser(connection);
                 connection.setAutoCommit(false);
                 log.debug("database={} phase=database_sync result=started", database);
@@ -1216,6 +1255,21 @@ public final class JdbcPostgreSqlClient implements PostgreSqlClient {
             throw new SQLException(
                     "Unsupported PostgreSQL ACL privilege: " + privilege, e
             );
+        }
+    }
+
+    private Connection connectScopeDatabase(String database, boolean required) throws SQLException {
+        try {
+            return connect(database);
+        } catch (SQLException e) {
+            // PostgreSQL's exact invalid_catalog_name response is native cascade
+            // cleanup for a removed previous scope. Never hide authorization or
+            // transport failures, and never skip a required desired database.
+            if (!required && "3D000".equals(e.getSQLState())) {
+                log.debug("database={} phase=scope result=absent reason=database_not_found", database);
+                return null;
+            }
+            throw e;
         }
     }
 

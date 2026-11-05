@@ -134,6 +134,26 @@ The Ranger service account needs permission to read the configured service,
 ServiceDefs, policies, and Ranger users, and to create users and policies and
 to update/delete policies for the configured service.
 
+## External lifecycle and repair
+
+Ranger policies refer to native resource strings and principal names, rather
+than HDFS/Ozone/Trino/Kafka object UUIDs. Recreating an external path, table or
+topic under the same name retains the policy's name-based meaning; PACT does
+not query those applications' object catalogs or prove their enforcement.
+Ranger policy IDs are physical CRUD identities: apply/cleanup reads current
+policies and never relies on a stale ID saved during preparation. Managed-only
+collision rules still reject an unrelated unlabelled replacement policy.
+
+Every apply and compensation re-reads the configured service type/ServiceDef
+and recompiles its target declaration before user or policy writes. A service
+type changed since preparation requires a fresh reconciliation; disappeared or
+invalid privileges fail before writes. Access-driven user ensure also runs for
+matching policies, allowing a removed Ranger user to be restored on an actual
+apply without rewriting the policy. These accounts remain after cleanup.
+This is not a periodic repair trigger: an equal declaration remains skipped by
+core after successful startup, while startup or source transitions invoke the
+backend. Failures reading the service, definition or policy catalog stop writes.
+
 ## Integration tests
 
 Policy catalog reads check all supported envelopes, duplicate IDs, changing

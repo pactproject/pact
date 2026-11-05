@@ -48,7 +48,7 @@ class RangerPolicySyncTest {
         sync.synchronize(current, List.of(desired));
         assertEquals(1, client.created);
         assertEquals(0, client.updated);
-        assertEquals(List.of("alice"), client.ensuredUsers);
+        assertEquals(List.of("alice", "alice"), client.ensuredUsers);
         assertEquals(2, client.deleted);
     }
 

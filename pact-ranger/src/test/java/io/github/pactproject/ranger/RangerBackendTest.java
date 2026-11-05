@@ -24,6 +24,73 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RangerBackendTest {
     @Test
+    void recreatedPolicyUsesCurrentPhysicalIdAfterPreparationAndCleanup() throws Exception {
+        var client = new FakeClient();
+        var backend = lifecycleBackend(client);
+        var desired = lifecycleState();
+        backend.apply(desired);
+        var pending = backend.prepareTransaction(desired, desired);
+        var replacement = (ObjectNode) client.policies.getFirst().deepCopy();
+        replacement.put("id", 999);
+        client.policies.clear();
+        client.policies.add(replacement);
+        pending.apply();
+        assertEquals(1, client.policies.size());
+        assertEquals(999, client.policies.getFirst().path("id").asLong());
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertTrue(client.policies.isEmpty());
+    }
+
+    @Test
+    void changedServiceDefinitionAfterPrepareFailsBeforeAnyPrincipalOrPolicyWrite() throws Exception {
+        var client = new FakeClient();
+        var backend = lifecycleBackend(client);
+        var pending = backend.prepareTransaction(PactState.empty(), lifecycleState());
+        client.definition = MAPPER.readTree("""
+                {"name":"ozone","resources":[{"name":"volume"}],"accessTypes":[]}
+                """);
+        assertThrows(io.github.pactproject.api.exception.BackendException.class, pending::apply);
+        assertTrue(client.policies.isEmpty());
+        assertTrue(client.existingUsers.isEmpty());
+    }
+
+    @Test
+    void missingAccessDrivenPrincipalIsEnsuredEvenWhenPolicyAlreadyMatches() throws Exception {
+        var client = new FakeClient();
+        var backend = lifecycleBackend(client);
+        var desired = lifecycleState();
+        backend.apply(desired);
+        var policy = client.policies.getFirst().deepCopy();
+        client.existingUsers.clear();
+        var pending = backend.prepareTransaction(desired, desired);
+        assertTrue(client.existingUsers.isEmpty(), "preparation must not recreate a principal");
+        pending.apply();
+        assertTrue(client.existingUsers.contains("alice"));
+        assertEquals(policy, client.policies.getFirst(), "Ensuring the missing principal must not rewrite matching policies");
+    }
+
+    @Test
+    void replacedServiceTypeAfterPrepareRequiresRetryWithoutWrites() throws Exception {
+        var client = new FakeClient();
+        var pending = lifecycleBackend(client).prepareTransaction(PactState.empty(), lifecycleState());
+        client.serviceType = "kafka";
+        var failure = assertThrows(io.github.pactproject.api.exception.BackendException.class, pending::apply);
+        assertTrue(failure.getCause().getMessage().contains("service type changed"));
+        assertTrue(client.policies.isEmpty());
+        assertTrue(client.existingUsers.isEmpty());
+    }
+
+    private static RangerBackend lifecycleBackend(FakeClient client) {
+        return new RangerBackend("ozone", new RangerConfig(URI.create("http://localhost:6080/service"),
+                "sync", "secret", "ozone-cluster", 100), client);
+    }
+
+    private static PactState lifecycleState() {
+        return new PactState(Set.of(new Access("alice", new Resource("ozone", Map.of("volume", "warehouse")),
+                Map.of("permissions", Value.object(Map.of("volume", Value.set(Set.of(Value.string("read")))))))));
+    }
+
+    @Test
     void recoveryCleansServiceWhenCurrentAndAgreedDeclarationsAreEmpty() throws Exception {
         var client = new FakeClient();
         var backend = new RangerBackend("ozone", new RangerConfig(
@@ -166,21 +233,26 @@ class RangerBackendTest {
         private final List<JsonNode> policies = new ArrayList<>();
         private final AtomicLong ids = new AtomicLong();
         private boolean failAfterCreate;
+        private JsonNode definition;
+        private String serviceType = "ozone";
+        private final Set<String> existingUsers = new java.util.HashSet<>();
 
         @Override
         public void ensureUser(String username) {
+            existingUsers.add(username);
         }
 
         @Override
         public String getServiceType(String serviceName) {
             assertEquals("ozone-cluster", serviceName);
-            return "ozone";
+            return serviceType;
         }
 
         @Override
         public JsonNode getServiceDefinition(String serviceType)
                 throws io.github.pactproject.ranger.api.RangerClientException {
             try {
+                if (definition != null) return definition.deepCopy();
                 return MAPPER.readTree("""
                         {
                           "name":"ozone",

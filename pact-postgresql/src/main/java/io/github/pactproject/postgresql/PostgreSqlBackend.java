@@ -95,6 +95,7 @@ public final class PostgreSqlBackend implements Backend {
                 Set.copyOf(defaultScopes);
         Set<Grant> observedGrants;
         try {
+            client.validateReferences(desiredGrants, desired.defaultPrivileges(), desiredIdentities);
             client.validateOwnerships(desired.ownerships(), desiredIdentities.stream()
                     .filter(Identity::ensure).map(Identity::principal)
                     .collect(java.util.stream.Collectors.toUnmodifiableSet()));
@@ -126,6 +127,15 @@ public final class PostgreSqlBackend implements Backend {
         return new BackendTransaction() {
             @Override
             public void apply() throws BackendException {
+                try {
+                    client.validateReferences(desiredGrants, desired.defaultPrivileges(), desiredIdentities);
+                    client.validateOwnerships(desired.ownerships(), desiredIdentities.stream()
+                            .filter(Identity::ensure).map(Identity::principal)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+                } catch (PostgreSqlClientException e) {
+                    throw new BackendOperationException("Failed to validate PostgreSQL references before writes for backend '"
+                            + id + "'", e);
+                }
                 desiredIdentities.forEach(identity -> log.debug("backend={} action=reconcile_identity principal={} ensure={} password_update_requested={}",
                         id, identity.principal(), identity.ensure(), identity.password() != null));
                 log.info(

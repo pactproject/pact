@@ -11,6 +11,65 @@ import static io.github.pactproject.grafana.GrafanaCompilerTest.*;
 import static io.github.pactproject.grafana.model.GrafanaResource.Kind.*;
 
 class GrafanaBackendTest {
+    @Test void recreatedFolderAfterPrepareRequiresRetryAndNeverFollowsAnOldUid() throws Exception {
+        var client = new FakeGrafanaClient();
+        var old = client.add(FOLDER, "old", "Reports", "");
+        var backend = new GrafanaBackend("monitoring", client);
+        var named = state(access("alice", Map.of("folder", "Reports"), "View"));
+        var pending = backend.prepareTransaction(PactState.empty(), named);
+        client.objects.removeIf(object -> object.resource().equals(old));
+        client.acls.remove(old); // Native object deletion cascades its ACL.
+        var replacement = client.add(FOLDER, "new", "Reports", "");
+        client.acls.put(replacement, List.of(GrafanaPermission.user(20, 4)));
+        assertThrows(ValidationException.class, pending::apply);
+        assertEquals(0, client.writes);
+        assertEquals(List.of(GrafanaPermission.user(20, 4)), client.acls.get(replacement));
+        assertThrows(ValidationException.class, () -> backend.prepareTransaction(PactState.empty(),
+                state(access("alice", Map.of("folderUid", "old"), "View"))));
+        backend.prepareTransaction(PactState.empty(), named).apply();
+        assertEquals(List.of(GrafanaPermission.user(10, 1)), client.acls.get(replacement));
+        backend.prepareTransaction(named, PactState.empty()).apply();
+        assertTrue(client.acls.get(replacement).isEmpty());
+        assertFalse(client.acls.containsKey(old));
+    }
+
+    @Test void recreatedLoginAfterPrepareFailsBeforeWritesThenRetryUsesCurrentUserId() throws Exception {
+        var client = new FakeGrafanaClient();
+        var folder = client.add(FOLDER, "reports", "Reports", "");
+        var backend = new GrafanaBackend("monitoring", client);
+        var desired = state(access("alice", Map.of("folderUid", "reports"), "View"));
+        var pending = backend.prepareTransaction(PactState.empty(), desired);
+        client.users.removeIf(user -> user.login().equals("alice"));
+        client.users.add(new GrafanaUser(30, "alice"));
+        client.acls.put(folder, List.of(GrafanaPermission.user(10, 4)));
+        assertThrows(ValidationException.class, pending::apply);
+        assertEquals(0, client.writes);
+        backend.prepareTransaction(PactState.empty(), desired).apply();
+        assertEquals(List.of(GrafanaPermission.user(30, 1)), client.acls.get(folder));
+        backend.prepareTransaction(desired, PactState.empty()).apply();
+        assertTrue(client.acls.get(folder).isEmpty());
+    }
+
+    @Test void recreatedNamedFolderIsRepairedOnStartupButNotByEqualSourceInRunningCore() throws Exception {
+        var client = new FakeGrafanaClient();
+        var old = client.add(FOLDER, "old", "Reports", "");
+        var backend = new GrafanaBackend("monitoring", client);
+        var desired = state(access("alice", Map.of("folder", "Reports"), "View"));
+        var core = new PactCore(List.of(backend));
+        core.apply(desired);
+        client.objects.clear();
+        client.acls.remove(old);
+        var replacement = client.add(FOLDER, "new", "Reports", "");
+        core.apply(desired);
+        assertTrue(client.acls.get(replacement).isEmpty());
+        var restarted = new PactCore(List.of(backend));
+        restarted.restoreAppliedState(desired);
+        restarted.apply(desired);
+        assertEquals(List.of(GrafanaPermission.user(10, 1)), client.acls.get(replacement));
+        restarted.apply(PactState.empty());
+        assertTrue(client.acls.get(replacement).isEmpty());
+    }
+
     @Test void namedScopeFollowsCurrentFolderNameAcrossTransitionsAndRemoval() throws Exception {
         var client = new FakeGrafanaClient();
         var original = client.add(FOLDER, "original", "Reports", "");

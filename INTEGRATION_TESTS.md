@@ -232,6 +232,16 @@ declaration and performs startup repair, then verifies name/ID equivalence and
 revocation. Fake-client tests separately force orphan/duplicate rows independent
 of native cascade deletion.
 
+B12 live scenarios also recreate Grafana dashboard/login IDs and verify access
+and revocation; replace Ranger physical policy IDs in all four ServiceDefs;
+drop/recreate PostgreSQL table/role OIDs under the same names and remove each
+of the seven target levels between prepare/apply before identity writes; and
+recreate Elasticsearch index/user names while verifying native name semantics,
+outside-index denial and revocation. The PostgreSQL previous-database case
+requires a disposable cluster and verifies cleanup in its surviving database.
+These scenarios are included by the existing live class selectors; no user's
+Grafana, database, Ranger service or Elasticsearch cluster may be substituted.
+
 The enforcement suite requires `current`. Its CIDR scenario additionally needs
 `PACT_IT_ARTIFACT_KEEPER_ALLOWED_PROBE_URL`,
 `PACT_IT_ARTIFACT_KEEPER_DENIED_PROBE_URL`, and
@@ -336,6 +346,15 @@ The second scenario stops the first controller JVM, starts a new JVM, verifies
 restoration of all five accesses from `status.lastAppliedSpec` without changing
 physical permission IDs, then deletes the resource and verifies real cleanup.
 This is provider persistence; filesystem applied state remains process-local.
+
+Lifecycle cases also recreate the repository key with a new native ID, delete
+the DataAccess and recreate the same Kubernetes name with a new UID, in both
+finalizer modes. Enabled finalizers additionally cover deletion while the
+controller is stopped. An overlapping-declarations case verifies that replacing
+one identical declaration leaves the aggregate equal and skips repair until
+startup reconciliation. Opt-out cleanup assertions wait for a successful,
+complete empty permission catalog; a concurrent inconsistent read is never
+accepted as evidence of revocation.
 
 The tests create and remove only their dedicated
 `integration.pactproject.github.io` CRD and namespace when absent, and require

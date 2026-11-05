@@ -15,12 +15,21 @@
   orphan rows, recreation between prepare/apply and compensation. Live tests
   verify private repository downloads before/after recreation/startup repair and
   real Kubernetes finalizer opt-out, including failed startup cleanup.
+  The repository-recreation/delete/recreate DataAccess chain is tested in both
+  finalizer modes, including startup cleanup and overlapping declarations.
 - Shared backend contract B12 defines reference lifetime, typed identity,
-  orphan cleanup, catalog failures, compensation and repair triggers. Existing
-  gaps for other backend lifecycle matrices are recorded in TESTING.md.
+  orphan cleanup, catalog failures, compensation and repair triggers. Lifecycle
+  regressions now cover all backend native models, with concrete remaining
+  limits recorded in TESTING.md.
+- PostgreSQL validates desired grant/default/identity references before identity
+  writes and rechecks them on apply. A removed previous database no longer blocks
+  remaining-database cleanup; only exact native database-not-found is skipped.
+- Ranger rechecks the service type and ServiceDef before apply/compensation and
+  ensures declared users even when policy content already matches. A removed
+  user can be restored on actual apply without a policy rewrite.
 - Artifact Keeper plugin is 1.0.1, Kubernetes plugin is 1.0.2, and Helm chart
-  1.1.2 defaults to image `ghcr.io/pactproject/pact:10`. Other plugin versions
-  remain unchanged.
+  1.1.2 defaults to image `ghcr.io/pactproject/pact:10`. PostgreSQL is 1.0.3 and
+  Ranger is 1.0.1; the other plugin versions remain unchanged.
 
 ## Upgrade from 9
 

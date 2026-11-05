@@ -30,6 +30,72 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ElasticsearchBackendTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(ElasticsearchReconciliationMode.class)
+    void removedPreviousUserDoesNotBlockOwnedRoleCleanupOrTouchOtherUsers(ElasticsearchReconciliationMode mode) throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice"));
+        client.users.put("bob", user("bob", "foreign"));
+        var backend = backend(client, "require", mode);
+        var previous = state(access("alice", "logs-*", "read"));
+        backend.apply(previous);
+        var bob = client.users.get("bob").deepCopy();
+        client.users.remove("alice");
+        backend.prepareTransaction(previous, PactState.empty(), Set.of(previous)).apply();
+        assertFalse(client.roles.containsKey(roleName("alice")));
+        assertFalse(client.users.containsKey("alice"));
+        assertEquals(bob, client.users.get("bob"));
+    }
+
+    @Test void missingDesiredUserAfterPrepareFailsBeforeAnyOtherUserCanBeEnsured() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice"));
+        var desired = new PactState(Set.of(access("alice", "logs-*", "read")),
+                Set.of(new Identity("search", "new-user", true, null, null, null)));
+        var pending = backend(client, "ensure").prepareTransaction(PactState.empty(), desired);
+        client.users.remove("alice");
+        assertThrows(BackendOperationException.class, pending::apply);
+        assertEquals(0, client.writes);
+        assertFalse(client.users.containsKey("new-user"));
+        assertTrue(client.roles.isEmpty());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(ElasticsearchReconciliationMode.class)
+    void recreatedNativeUsernameFollowsCurrentProfileWithoutCreatingOrRotatingCredentials(ElasticsearchReconciliationMode mode) throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice"));
+        var backend = backend(client, "require", mode);
+        var desired = state(access("alice", "logs-*", "read"));
+        var pending = backend.prepareTransaction(PactState.empty(), desired);
+        var replacement = user("alice", "foreign");
+        replacement.put("full_name", "Replacement account");
+        replacement.put("enabled", false);
+        client.users.put("alice", replacement);
+        pending.apply();
+        assertEquals("Replacement account", client.users.get("alice").path("full_name").asText());
+        assertFalse(client.users.get("alice").path("enabled").asBoolean());
+        assertEquals(mode == ElasticsearchReconciliationMode.MANAGED ? Set.of("foreign", roleName("alice"))
+                : Set.of(roleName("alice")), client.rolesOf("alice"));
+        assertTrue(client.passwordsUsedOnCreate.isEmpty());
+        assertTrue(client.passwordUpdates.isEmpty());
+        pending.rollback();
+        assertFalse(client.roles.containsKey(roleName("alice")));
+        assertTrue(client.users.containsKey("alice"));
+    }
+
+    @Test void recreatedSharedRoleUsesItsNativeNameWithoutEditingTheReplacementDefinition() throws Exception {
+        var client = new FakeClient();
+        client.users.put("alice", user("alice"));
+        client.roles.put("shared", MAPPER.createObjectNode());
+        var pending = backend(client, "require").prepareTransaction(PactState.empty(), state(cluster("alice", null, "shared")));
+        var replacement = MAPPER.createObjectNode().put("external_generation", 2);
+        client.roles.put("shared", replacement);
+        pending.apply();
+        assertEquals(replacement, client.roles.get("shared"));
+        assertEquals(Set.of("shared"), client.rolesOf("alice"));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(ElasticsearchReconciliationMode.class)
     void recoveryRemovesAssignmentsOfAttemptedUsersOutsidePreviousAndCurrentState(ElasticsearchReconciliationMode mode)
             throws Exception {
         var client = new FakeClient();

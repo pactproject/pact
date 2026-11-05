@@ -691,6 +691,31 @@ database of that cluster. Deployment-specific constraints
 (for example, managed PostgreSQL products that restrict grant authority) need
 integration coverage before being claimed as supported.
 
+## External object and principal lifecycle
+
+Declarations use exact native names/signatures, not durable PostgreSQL OID
+selectors. A drop/recreate under the same database/schema/object/role name is
+resolved again on actual application; native deletion removes the old object's
+ACLs. Equal declarations remain skipped after successful core startup; a source
+transition or startup reconciliation is required to repair replacement objects.
+
+Preparation and apply both validate all desired grant/default references and
+identity existence/LOGIN requirements read-only before identity or ACL writes.
+Planned ensure roles may be absent, while target schemas, relations, columns,
+sequence kinds and exact routine signatures must exist. Ownership has its own
+additional conflict/dependency validation. Validation cannot lock all databases
+against later external deletion; a subsequent race can still cause partial
+failure and compensation.
+
+An absent database used only by previous/recovery declarations is already
+cleaned by native cascade. Reads and cleanup skip only the exact PostgreSQL
+`3D000` (database-not-found) response for that scope; authentication/transport
+errors remain failures. Missing desired databases are never skipped. This
+allows cleanup in remaining databases without recreating a deleted database.
+Previous declarative names, including default scopes and explicit owners,
+remain the compensation target; unknown original owners/passwords are not
+restored and targets are never created implicitly.
+
 ## Identity reconciliation
 
 Identity declarations live at `DataAccess.spec.identities`, independently of

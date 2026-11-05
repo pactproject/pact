@@ -20,6 +20,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -46,6 +48,119 @@ class KubernetesArtifactKeeperLiveIntegrationTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(60);
     private static final ObjectMapper JSON = new ObjectMapper();
     @TempDir Path temp;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void recreatedRepositoryThenDeletedAndRecreatedDataAccessUsesNewUidsAndRevokesOldGrants(boolean finalizersEnabled) throws Exception {
+        try (var fixture = new Fixture()) {
+            var base = ArtifactKeeperControllerProcess.kubernetesConfig();
+            var config = new io.github.pactproject.kubernetes.config.KubernetesConfig(
+                    base.group(), base.version(), base.plural(), base.informerResyncMillis(),
+                    base.informerStartTimeoutSeconds(), base.statusRetryDelaysMillis(), finalizersEnabled);
+            var core = new PactCore(List.of(new ArtifactKeeperBackend("packages", fixture.ak)));
+            try (var provider = new KubernetesStateProvider(new KubernetesClientBuilder().build(), config)) {
+                provider.start(new ArtifactKeeperControllerProcess.CoreReconciler(core));
+                fixture.createDataAccess(fixture.repository);
+                fixture.awaitReady();
+                fixture.assertGrants();
+                var first = fixture.resources().withName(fixture.name).get();
+                String oldUid = first.getMetadata().getUid();
+                String oldRepositoryId = fixture.repositoryId, oldArtifactId = fixture.artifactId;
+                var oldPermissionIds = fixture.permissions().stream().map(ArtifactKeeperApiPermission::id)
+                        .collect(Collectors.toSet());
+                assertEquals(finalizersEnabled, first.getMetadata().getFinalizers() != null
+                        && first.getMetadata().getFinalizers().contains(base.group() + "/data-access"));
+                fixture.recreateRepository();
+                assertNotEquals(oldRepositoryId, fixture.repositoryId);
+                fixture.resources().withName(fixture.name).delete();
+                await(() -> fixture.resources().withName(fixture.name).get() == null, "deletion after repository recreation");
+                if (finalizersEnabled) {
+                    assertTrue(fixture.permissions().isEmpty(), "Enabled finalizer must finish cleanup before API deletion");
+                }
+                // With opt-out, recreate immediately after API deletion, without
+                // waiting for asynchronous backend cleanup of the old UID.
+                fixture.createDataAccess(fixture.repository);
+                fixture.awaitReady();
+                var replacement = fixture.resources().withName(fixture.name).get();
+                assertNotEquals(oldUid, replacement.getMetadata().getUid());
+                assertEquals(1L, replacement.getMetadata().getGeneration().longValue());
+                fixture.assertGrants();
+                assertFalse(fixture.permissions().stream().anyMatch(permission ->
+                        permission.targetId().equals(oldRepositoryId)
+                                || (!oldArtifactId.equals(fixture.artifactId) && permission.targetId().equals(oldArtifactId))));
+                assertTrue(fixture.permissions().stream().noneMatch(permission -> oldPermissionIds.contains(permission.id())));
+                fixture.deleteAndAwait();
+            }
+        }
+    }
+
+    @Test
+    void startupCleansDeletingDataAccessAfterRepositoryRecreationAndAllowsSameNameAgain() throws Exception {
+        try (var fixture = new Fixture()) {
+            var config = ArtifactKeeperControllerProcess.kubernetesConfig();
+            String oldUid;
+            try (var first = new KubernetesStateProvider(new KubernetesClientBuilder().build(), config)) {
+                var core = new PactCore(List.of(new ArtifactKeeperBackend("packages", fixture.ak)));
+                first.start(new ArtifactKeeperControllerProcess.CoreReconciler(core));
+                fixture.createDataAccess(fixture.repository);
+                fixture.awaitReady();
+                oldUid = fixture.resources().withName(fixture.name).get().getMetadata().getUid();
+            }
+            String oldRepositoryId = fixture.repositoryId;
+            fixture.recreateRepository();
+            assertNotEquals(oldRepositoryId, fixture.repositoryId);
+            fixture.resources().withName(fixture.name).delete();
+            var deleting = fixture.resources().withName(fixture.name).get();
+            assertNotNull(deleting);
+            assertNotNull(deleting.getMetadata().getDeletionTimestamp());
+            assertNotNull(deleting.getAdditionalProperties().get("status"));
+            var restartedCore = new PactCore(List.of(new ArtifactKeeperBackend("packages", fixture.ak)));
+            try (var restarted = new KubernetesStateProvider(new KubernetesClientBuilder().build(), config)) {
+                restarted.start(new ArtifactKeeperControllerProcess.CoreReconciler(restartedCore));
+                await(() -> fixture.resources().withName(fixture.name).get() == null, "startup cleanup of deleting DataAccess");
+                assertTrue(fixture.permissions().isEmpty());
+                fixture.createDataAccess(fixture.repository);
+                fixture.awaitReady();
+                assertNotEquals(oldUid, fixture.resources().withName(fixture.name).get().getMetadata().getUid());
+                fixture.assertGrants();
+                fixture.deleteAndAwait();
+            }
+        }
+    }
+
+    @Test
+    void overlappingDataAccessKeepsEqualAggregateAndRequiresStartupToRepairRecreatedRepository() throws Exception {
+        try (var fixture = new Fixture()) {
+            String sharedName = fixture.name + "-shared";
+            var config = ArtifactKeeperControllerProcess.kubernetesConfig();
+            var core = new PactCore(List.of(new ArtifactKeeperBackend("packages", fixture.ak)));
+            try (var first = new KubernetesStateProvider(new KubernetesClientBuilder().build(), config)) {
+                first.start(new ArtifactKeeperControllerProcess.CoreReconciler(core));
+                fixture.createDataAccess(fixture.repository);
+                fixture.awaitReady();
+                fixture.createDataAccess(fixture.repository, sharedName);
+                fixture.awaitReady(sharedName);
+                fixture.recreateRepository();
+                fixture.resources().withName(fixture.name).delete();
+                await(() -> fixture.resources().withName(fixture.name).get() == null, "delete while shared access remains");
+                fixture.createDataAccess(fixture.repository);
+                fixture.awaitReady();
+                assertTrue(fixture.permissions().stream().noneMatch(permission -> permission.targetId().equals(fixture.repositoryId)),
+                        "Equal aggregate is deliberately skipped; replacing one overlapping DataAccess is not a drift-repair trigger");
+            }
+            var restartedCore = new PactCore(List.of(new ArtifactKeeperBackend("packages", fixture.ak)));
+            try (var restarted = new KubernetesStateProvider(new KubernetesClientBuilder().build(), config)) {
+                restarted.start(new ArtifactKeeperControllerProcess.CoreReconciler(restartedCore));
+                fixture.awaitReady();
+                fixture.awaitReady(sharedName);
+                fixture.assertGrants();
+                fixture.resources().withName(fixture.name).delete();
+                await(() -> fixture.resources().withName(fixture.name).get() == null, "remove first overlapping declaration");
+                fixture.assertGrants();
+                fixture.deleteAndAwait(sharedName);
+            }
+        }
+    }
 
     @Test
     void optOutReleasesDeletingResourceBeforeFailedStartupCleanupOnRealApi() throws Exception {
@@ -197,6 +312,7 @@ class KubernetesArtifactKeeperLiveIntegrationTest {
                 .withPlural(System.getenv().getOrDefault("PACT_IT_K8S_PLURAL", "dataaccesses"))
                 .withKind("DataAccess").withNamespaced(true).build();
         final ArrayDeque<String> cleanup = new ArrayDeque<>();
+        final Set<String> dataAccessNames = new java.util.LinkedHashSet<>();
         String repositoryId;
         String projectId;
         String groupId;
@@ -255,6 +371,23 @@ class KubernetesArtifactKeeperLiveIntegrationTest {
         }
 
         void createDataAccess() {
+            createDataAccess(displayName);
+        }
+
+        void recreateRepository() throws Exception {
+            api("DELETE", "/api/v1/repositories/" + repository, null);
+            repositoryId = api("POST", "/api/v1/repositories", Map.of(
+                    "key", repository, "name", displayName + " replacement", "format", "generic",
+                    "repo_type", "local", "is_public", false)).path("id").asText();
+            artifactId = api("PUT", "/api/v1/repositories/" + repository + "/artifacts/org/app.bin",
+                    Map.of("fixture", "kubernetes")).path("id").asText();
+        }
+
+        void createDataAccess(String repositorySelector) {
+            createDataAccess(repositorySelector, name);
+        }
+
+        void createDataAccess(String repositorySelector, String resourceName) {
             // Parse the public YAML shape, rather than constructing an already compiled PactState.
             String yaml = """
                     apiVersion: %s/%s
@@ -290,21 +423,26 @@ class KubernetesArtifactKeeperLiveIntegrationTest {
                             - users: [%s]
                               principal-type: group
                               permissions: [read]
-                    """.formatted(group, context.getVersion(), name, namespace, displayName, user, serviceAccount,
-                    displayName, serviceAccount, projectName, user, groupName, groupName);
+                    """.formatted(group, context.getVersion(), resourceName, namespace, repositorySelector, user, serviceAccount,
+                    repositorySelector, serviceAccount, projectName, user, groupName, groupName);
+            dataAccessNames.add(resourceName);
             resources().resource(Serialization.unmarshal(yaml, GenericKubernetesResource.class)).create();
         }
 
-        @SuppressWarnings("unchecked")
         void awaitReady() throws Exception {
+            awaitReady(name);
+        }
+
+        @SuppressWarnings("unchecked")
+        void awaitReady(String resourceName) throws Exception {
             await(() -> {
-                var resource = resources().withName(name).get();
+                var resource = resources().withName(resourceName).get();
                 if (resource == null || !(resource.getAdditionalProperties().get("status") instanceof Map<?, ?> status)) return false;
                 if ("Error".equals(status.get("phase"))) fail("DataAccess failed: " + status.get("lastError"));
                 return "Ready".equals(status.get("phase"))
                         && ((Number) status.get("observedGeneration")).longValue() == resource.getMetadata().getGeneration();
             }, "Ready DataAccess with its current generation");
-            var status = (Map<String, Object>) resources().withName(name).get().getAdditionalProperties().get("status");
+            var status = (Map<String, Object>) resources().withName(resourceName).get().getAdditionalProperties().get("status");
             assertNotNull(status.get("lastAppliedSpec"));
             assertTrue(status.get("lastAppliedSpec").toString().contains("allowed_cidrs"));
             assertFalse(status.get("lastAppliedSpec").toString().contains("conditions"));
@@ -344,9 +482,35 @@ class KubernetesArtifactKeeperLiveIntegrationTest {
         }
 
         void deleteAndAwait() throws Exception {
-            resources().withName(name).delete();
-            await(() -> resources().withName(name).get() == null, "DataAccess finalizer cleanup");
-            await(() -> permissions().isEmpty(), "removal of actual Artifact Keeper permissions");
+            deleteAndAwait(name);
+        }
+
+        void deleteAndAwait(String resourceName) throws Exception {
+            resources().withName(resourceName).delete();
+            await(() -> resources().withName(resourceName).get() == null, "DataAccess finalizer cleanup");
+            var inconsistent = new java.util.concurrent.atomic.AtomicReference<Exception>();
+            try {
+                await(() -> {
+                    try {
+                        boolean empty = ak.getPermissions().isEmpty();
+                        inconsistent.set(null);
+                        return empty;
+                    } catch (io.github.pactproject.artifactkeeper.client.ArtifactKeeperClientException failure) {
+                        // An observer can race asynchronous opt-out cleanup.
+                        // Keep waiting for a successful complete read; an
+                        // inconsistent catalog is never evidence of emptiness.
+                        if (failure.getMessage() == null || !failure.getMessage().startsWith(
+                                "Artifact Keeper catalog is incomplete or inconsistent: /api/v1/permissions")) {
+                            throw new AssertionError("Cannot inspect live grants", failure);
+                        }
+                        inconsistent.set(failure);
+                        return false;
+                    }
+                }, "removal of actual Artifact Keeper permissions");
+            } catch (AssertionError timeout) {
+                if (inconsistent.get() != null) timeout.addSuppressed(inconsistent.get());
+                throw timeout;
+            }
         }
 
         JsonNode api(String method, String path, Object body) throws Exception {
@@ -361,11 +525,13 @@ class KubernetesArtifactKeeperLiveIntegrationTest {
         @Override public void close() throws Exception {
             try {
                 new ArtifactKeeperBackend("packages", ak, ArtifactKeeperApiProfile.CURRENT).apply(PactState.empty());
-                var resource = resources().withName(name).get();
-                if (resource != null) {
-                    resource.getMetadata().setFinalizers(List.of());
-                    resources().resource(resource).update();
-                    resources().withName(name).delete();
+                for (String resourceName : dataAccessNames) {
+                    var resource = resources().withName(resourceName).get();
+                    if (resource != null) {
+                        resource.getMetadata().setFinalizers(List.of());
+                        resources().resource(resource).update();
+                        resources().withName(resourceName).delete();
+                    }
                 }
                 while (!cleanup.isEmpty()) api("DELETE", cleanup.pop(), null);
             } finally {

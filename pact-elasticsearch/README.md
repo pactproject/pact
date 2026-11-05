@@ -138,6 +138,26 @@ this scope. Startup reapplies equal restored state; verify that the current
 declaration is complete before restarting with a new mode. Later equal state
 is skipped within the same process.
 
+## External deletion and recreation
+
+Index targets are native names/patterns, not index UUID bindings. They may name
+future indices. Dropping/recreating an index matched by a role does not require
+PACT to rewrite that role: Elasticsearch applies its name/pattern privileges
+to the new index immediately. Unrelated index names remain outside the pattern.
+PACT does not load an index catalog or treat an absent index as an invalid
+desired reference. Existing shared roles also have native name identity; their
+definitions remain externally managed, including replacement under that name.
+
+Native users are addressed by username. A recreated existing username is the
+current account; PACT preserves its current profile/enabled fields and does not
+reset its password unless an explicit identity rotation calls for it. A missing
+desired user fails before any writes unless both explicit ensure and the
+backend's principal-mode permit creation. Missing previous users do not block
+cleanup of their verified owned generated roles. Missing shared-role references
+and changed generated-role ownership still fail closed before writes.
+Apply rechecks these references after preparation. Core's usual equality
+shortcut and startup/source repair triggers remain unchanged.
+
 ## Account passwords and compensation
 
 Identity creation is independent of grants, so `spec.identities` alone can

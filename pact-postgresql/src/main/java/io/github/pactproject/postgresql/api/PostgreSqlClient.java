@@ -10,6 +10,14 @@ import io.github.pactproject.api.Identity;
 import java.util.Set;
 
 public interface PostgreSqlClient {
+    /** Read-only validation before any identities or permissions are written. */
+    default void validateReferences(Set<Grant> grants, Set<DefaultPrivilegeGrant> defaults,
+            Set<Identity> identities) throws PostgreSqlClientException {
+        if (!grants.isEmpty() || !defaults.isEmpty() || !identities.isEmpty()) {
+            throw new PostgreSqlClientException("PostgreSQL client does not implement read-only reference validation");
+        }
+    }
+
     /** Read-only ownership validation; ensured roles may be created during apply. */
     default void validateOwnerships(Set<Ownership> desired, Set<String> ensuredRoles)
             throws PostgreSqlClientException {

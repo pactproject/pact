@@ -105,7 +105,7 @@ class JdbcOwnershipTest {
                 new RoutineSignature("echo", arguments)), role);
     }
 
-    private static Connection connection(BiFunction<String, Map<Integer, Object>, List<List<Object>>> catalog,
+    static Connection connection(BiFunction<String, Map<Integer, Object>, List<List<Object>>> catalog,
             List<String> writes) {
         return proxy(Connection.class, (method, args) -> switch (method) {
             case "prepareStatement" -> query((String) args[0], catalog, writes, PreparedStatement.class);
@@ -131,6 +131,7 @@ class JdbcOwnershipTest {
             case "next" -> ++index[0] < data.size();
             case "getLong" -> ((Number) data.get(index[0]).get((Integer) args[0] - 1)).longValue();
             case "getString" -> (String) data.get(index[0]).get((Integer) args[0] - 1);
+            case "getBoolean" -> (Boolean) data.get(index[0]).get((Integer) args[0] - 1);
             case "wasNull" -> false;
             default -> null;
         });

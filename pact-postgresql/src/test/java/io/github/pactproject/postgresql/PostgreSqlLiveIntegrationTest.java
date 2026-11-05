@@ -17,6 +17,8 @@ import io.github.pactproject.postgresql.model.DefaultPrivilegeScope;
 import io.github.pactproject.postgresql.model.DefaultPrivilegeType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.postgresql.ds.PGSimpleDataSource;
 
 import java.sql.Connection;
@@ -45,6 +47,205 @@ class PostgreSqlLiveIntegrationTest {
     private static final String UPDATED_PASSWORD = "PactIt-updated-password";
 
     @Test
+    void recreatedTableHasNewOidAndNameBoundGrantsRepairOnlyWhenReconciled() throws Exception {
+        var config = lifecycleConfig();
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String database = "pact_b12_" + suffix, role = "pact_b12_role_" + suffix;
+        createDatabase(config, database);
+        try {
+            createFixture(config, database, SCHEMA);
+            try (var connection = adminConnection(config); var statement = connection.createStatement()) {
+                statement.execute("CREATE ROLE " + quoteIdentifier(role) + " LOGIN PASSWORD " + quoteLiteral(INITIAL_PASSWORD));
+            }
+            var jdbc = new JdbcPostgreSqlClient(config);
+            var backend = new PostgreSqlBackend(BACKEND_ID, jdbc);
+            var desired = lifecycleState(database, role);
+            var core = new io.github.pactproject.core.PactCore(java.util.List.of(backend));
+            core.apply(desired);
+            long oldOid = lifecycleTableOid(config, database);
+            assertTrue(lifecycleCanSelect(config, database, role));
+            try (var connection = databaseConnection(config, database, config.username(), config.password());
+                 var statement = connection.createStatement()) {
+                statement.execute("DROP TABLE " + quoteIdentifier(SCHEMA) + "." + quoteIdentifier(TABLE));
+                statement.execute("CREATE TABLE " + quoteIdentifier(SCHEMA) + "." + quoteIdentifier(TABLE) + " (value text)");
+            }
+            assertFalse(oldOid == lifecycleTableOid(config, database));
+            assertFalse(lifecycleCanSelect(config, database, role));
+            core.apply(desired);
+            assertFalse(lifecycleCanSelect(config, database, role), "Equal source does not repair external recreation in a running core");
+            var restarted = new io.github.pactproject.core.PactCore(java.util.List.of(backend));
+            restarted.restoreAppliedState(desired);
+            restarted.apply(desired);
+            assertTrue(lifecycleCanSelect(config, database, role));
+            restarted.apply(PactState.empty());
+            assertFalse(lifecycleCanSelect(config, database, role));
+        } finally { dropDatabaseAndRole(config, database, role); }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"database", "schema", "table", "column", "sequence", "function", "procedure"})
+    void removedTargetAfterPrepareFailsBeforeEnsuringAnyIdentity(String level) throws Exception {
+        var config = lifecycleConfig();
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String database = "pact_b12_" + suffix, role = "pact_b12_role_" + suffix;
+        createDatabase(config, database);
+        try {
+            createFixture(config, database, SCHEMA);
+            try (var connection = databaseConnection(config, database, config.username(), config.password());
+                 var statement = connection.createStatement()) {
+                statement.execute("CREATE SEQUENCE " + quoteIdentifier(SCHEMA) + ".standalone");
+                statement.execute("CREATE PROCEDURE " + quoteIdentifier(SCHEMA) + ".run() LANGUAGE SQL AS 'SELECT 1'");
+            }
+            var target = new HashMap<String, String>();
+            target.put("database", database);
+            if (!level.equals("database")) target.put("schema", SCHEMA);
+            if (level.equals("table") || level.equals("column")) target.put("table", TABLE);
+            if (level.equals("column")) target.put("column", COLUMN);
+            if (level.equals("sequence")) target.put("sequence", "standalone");
+            if (level.equals("function")) target.put("function", FUNCTION + "(integer)");
+            if (level.equals("procedure")) target.put("procedure", "run()");
+            String privilege = switch (level) {
+                case "database" -> "CONNECT";
+                case "schema", "sequence" -> "USAGE";
+                case "function", "procedure" -> "EXECUTE";
+                default -> "SELECT";
+            };
+            var desired = new PactState(Set.of(permissionAccess(role, target, Map.of(level, Set.of(privilege)))),
+                    Set.of(new Identity(BACKEND_ID, role, true, null, null, null)));
+            var backend = new PostgreSqlBackend(BACKEND_ID, new JdbcPostgreSqlClient(config));
+            var pending = backend.prepareTransaction(PactState.empty(), desired);
+            try (var connection = level.equals("database") ? adminConnection(config)
+                    : databaseConnection(config, database, config.username(), config.password());
+                 var statement = connection.createStatement()) {
+                String schema = quoteIdentifier(SCHEMA) + ".";
+                statement.execute(switch (level) {
+                    case "database" -> "DROP DATABASE " + quoteIdentifier(database);
+                    case "schema" -> "DROP SCHEMA " + quoteIdentifier(SCHEMA) + " CASCADE";
+                    case "table" -> "DROP TABLE " + schema + quoteIdentifier(TABLE);
+                    case "column" -> "ALTER TABLE " + schema + quoteIdentifier(TABLE) + " DROP COLUMN " + quoteIdentifier(COLUMN);
+                    case "sequence" -> "DROP SEQUENCE " + schema + "standalone";
+                    case "function" -> "DROP FUNCTION " + schema + quoteIdentifier(FUNCTION) + "(integer)";
+                    case "procedure" -> "DROP PROCEDURE " + schema + "run()";
+                    default -> throw new AssertionError(level);
+                });
+            }
+            assertThrows(BackendOperationException.class, pending::apply);
+            try (var connection = adminConnection(config);
+                 var query = connection.prepareStatement("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ?")) {
+                query.setString(1, role);
+                try (var rows = query.executeQuery()) {
+                    assertFalse(rows.next(), "Missing desired target must be detected before identity creation commits");
+                }
+            }
+            assertThrows(BackendOperationException.class, () -> backend.prepareTransaction(PactState.empty(), desired));
+        } finally { dropDatabaseAndRole(config, database, role); }
+    }
+
+    @Test
+    void removedPreviousDatabaseDoesNotBlockCleanupOfRemainingDatabase() throws Exception {
+        var config = lifecycleConfig();
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String gone = "pact_b12_gone_" + suffix, remaining = "pact_b12_kept_" + suffix, role = "pact_b12_role_" + suffix;
+        createDatabase(config, gone);
+        try {
+            createDatabase(config, remaining);
+            createFixture(config, gone, SCHEMA);
+            createFixture(config, remaining, SCHEMA);
+            try (var connection = adminConnection(config); var statement = connection.createStatement()) {
+                statement.execute("CREATE ROLE " + quoteIdentifier(role));
+            }
+            var accesses = new java.util.HashSet<>(lifecycleState(gone, role).accesses());
+            accesses.addAll(lifecycleState(remaining, role).accesses());
+            var previous = new PactState(accesses);
+            var backend = new PostgreSqlBackend(BACKEND_ID, new JdbcPostgreSqlClient(config));
+            backend.apply(previous);
+            try (var connection = adminConnection(config); var statement = connection.createStatement()) {
+                statement.execute("DROP DATABASE " + quoteIdentifier(gone));
+            }
+            backend.prepareTransaction(previous, PactState.empty(), Set.of(previous)).apply();
+            assertFalse(lifecycleCanSelect(config, remaining, role));
+        } finally {
+            dropDatabaseAndRole(config, gone);
+            dropDatabaseAndRole(config, remaining, role);
+        }
+    }
+
+    @Test
+    void recreatedRoleUsesCurrentOidAndKeepsItsManualPasswordWhenGrantNamesAreReapplied() throws Exception {
+        var config = lifecycleConfig();
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String database = "pact_b12_" + suffix, role = "pact_b12_role_" + suffix;
+        createDatabase(config, database);
+        try {
+            createFixture(config, database, SCHEMA);
+            try (var connection = adminConnection(config); var statement = connection.createStatement()) {
+                statement.execute("CREATE ROLE " + quoteIdentifier(role) + " LOGIN PASSWORD " + quoteLiteral(INITIAL_PASSWORD));
+            }
+            var desired = lifecycleState(database, role);
+            var backend = new PostgreSqlBackend(BACKEND_ID, new JdbcPostgreSqlClient(config));
+            backend.apply(desired);
+            var pending = backend.prepareTransaction(desired, desired);
+            long oldOid = lifecycleRoleOid(config, role);
+            try (var connection = databaseConnection(config, database, config.username(), config.password());
+                 var statement = connection.createStatement()) {
+                statement.execute("DROP OWNED BY " + quoteIdentifier(role));
+            }
+            try (var connection = adminConnection(config); var statement = connection.createStatement()) {
+                statement.execute("DROP ROLE " + quoteIdentifier(role));
+                statement.execute("CREATE ROLE " + quoteIdentifier(role) + " LOGIN PASSWORD " + quoteLiteral(UPDATED_PASSWORD));
+            }
+            assertFalse(oldOid == lifecycleRoleOid(config, role));
+            assertFalse(lifecycleCanSelect(config, database, role));
+            // PostgreSQL declarations bind exact names; there is no public OID selector.
+            pending.apply();
+            assertTrue(lifecycleCanSelect(config, database, role));
+            try (var connection = databaseConnection(config, database, role, UPDATED_PASSWORD);
+                 var statement = connection.createStatement();
+                 var rows = statement.executeQuery("SELECT * FROM " + quoteIdentifier(SCHEMA) + "." + quoteIdentifier(TABLE))) {
+                assertFalse(rows.next());
+            }
+            backend.prepareTransaction(desired, PactState.empty()).apply();
+            assertFalse(lifecycleCanSelect(config, database, role));
+        } finally { dropDatabaseAndRole(config, database, role); }
+    }
+
+    private static long lifecycleRoleOid(PostgreSqlConfig config, String role) throws SQLException {
+        try (var connection = adminConnection(config);
+             var query = connection.prepareStatement("SELECT oid FROM pg_catalog.pg_roles WHERE rolname=?")) {
+            query.setString(1, role);
+            try (var rows = query.executeQuery()) { assertTrue(rows.next()); return rows.getLong(1); }
+        }
+    }
+
+    private static PostgreSqlConfig lifecycleConfig() {
+        return PostgreSqlConfig.from(Map.of("jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
+                "username", required("PACT_IT_POSTGRESQL_USERNAME"), "password", required("PACT_IT_POSTGRESQL_PASSWORD")));
+    }
+
+    private static PactState lifecycleState(String database, String role) {
+        return new PactState(Set.of(permissionAccess(role,
+                Map.of("database", database, "schema", SCHEMA, "table", TABLE),
+                Map.of("database", Set.of("CONNECT"), "schema", Set.of("USAGE"), "table", Set.of("SELECT")))));
+    }
+
+    private static long lifecycleTableOid(PostgreSqlConfig config, String database) throws SQLException {
+        try (var connection = databaseConnection(config, database, config.username(), config.password());
+             var query = connection.prepareStatement("SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n "
+                     + "ON n.oid=c.relnamespace WHERE n.nspname=? AND c.relname=?")) {
+            query.setString(1, SCHEMA); query.setString(2, TABLE);
+            try (var rows = query.executeQuery()) { assertTrue(rows.next()); return rows.getLong(1); }
+        }
+    }
+
+    private static boolean lifecycleCanSelect(PostgreSqlConfig config, String database, String role) throws SQLException {
+        try (var connection = databaseConnection(config, database, config.username(), config.password());
+             var query = connection.prepareStatement("SELECT pg_catalog.has_table_privilege(?, ?, 'SELECT')")) {
+            query.setString(1, role); query.setString(2, quoteIdentifier(SCHEMA) + "." + quoteIdentifier(TABLE));
+            try (var rows = query.executeQuery()) { assertTrue(rows.next()); return rows.getBoolean(1); }
+        }
+    }
+
+    @Test
     void restoresPreviousDeclarationAfterRealDatabaseCommitAndInjectedLaterFailure() throws Exception {
         var config = PostgreSqlConfig.from(Map.of("jdbc-url", required("PACT_IT_POSTGRESQL_JDBC_URL"),
                 "username", required("PACT_IT_POSTGRESQL_USERNAME"), "password", required("PACT_IT_POSTGRESQL_PASSWORD")));
@@ -56,6 +257,10 @@ class PostgreSqlLiveIntegrationTest {
         var armed = new java.util.concurrent.atomic.AtomicBoolean();
         // Fault injection is outside JDBC: the first database really commits before failure.
         var faulting = new io.github.pactproject.postgresql.api.PostgreSqlClient() {
+            public void validateReferences(Set<Grant> grants, Set<DefaultPrivilegeGrant> defaults, Set<Identity> identities)
+                    throws io.github.pactproject.postgresql.api.PostgreSqlClientException {
+                jdbc.validateReferences(grants, defaults, identities);
+            }
             public Set<Grant> getManagedGrants(Set<String> databases)
                     throws io.github.pactproject.postgresql.api.PostgreSqlClientException {
                 return jdbc.getManagedGrants(databases);

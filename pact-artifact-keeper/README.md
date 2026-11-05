@@ -162,12 +162,28 @@ fail while a current desired reference is missing. Disabling Kubernetes
 finalizers only unblocks resource deletion; it does not repair Artifact Keeper
 permissions or change this validation behavior.
 
+For a repository selected by a still-valid name/key, deleting its only
+DataAccess and then creating it again is a supported repair path: deletion
+reconciles the aggregate without those grants, and creation resolves the new
+repository ID. Wait for the old DataAccess to disappear before recreating the
+same Kubernetes name. With finalizers enabled, disappearance follows successful
+cleanup; with opt-out it does not prove revocation. A declaration pinned to the
+old repository ID must be updated to the new ID.
+
+If another DataAccess still requests exactly the same accesses, deleting and
+recreating just one leaves the aggregate unchanged. Core skips that equal state,
+so this sequence does not repair external recreation. Restart PACT for startup
+reconciliation, or make a real change to the aggregate desired access state.
+
 Regression tests cover stable-ID rename, keys equal to another target's UUID,
 duplicate orphan grants, preflight/apply changes and compensation/retry. A live
 enforcement scenario deletes/recreates a private repository under the same key,
 verifies a new ID and denied downloads before repair, then checks startup repair,
 name/ID equivalence and revocation. Fake tests force orphan rows independently of
 the server's cascade behavior.
+Real Kubernetes/AK tests also cover delete/recreate with finalizers enabled and
+disabled, startup with a deleting resource, and the unchanged overlapping-state
+case followed by startup repair.
 
 Filesystem access uses `principal`, `resource.backendId`, `resource.target`,
 and `attributes` (`actions`, `principal-type`, and optional `allowed_cidrs`), as
